@@ -90,6 +90,41 @@ function resolveConfiguredPrimaryTarget(): PrimaryEnvironmentTarget | null {
   };
 }
 
+/**
+ * When the UI is opened from a non-loopback hostname (LAN / Tailscale) but the
+ * build still points the API at loopback, rewrite to the page hostname so the
+ * browser does not try to reach its own localhost.
+ */
+function rewriteConfiguredTargetLoopbackHostForPageHostname(
+  target: PrimaryEnvironmentTarget,
+): PrimaryEnvironmentTarget {
+  if (target.source !== "configured") {
+    return target;
+  }
+
+  const pageHostname = normalizeHostname(new URL(window.location.href).hostname);
+  if (isLoopbackHostname(pageHostname)) {
+    return target;
+  }
+
+  const rewriteIfLoopback = (rawBaseUrl: string): string => {
+    const url = new URL(normalizeBaseUrl(rawBaseUrl));
+    if (!isLoopbackHostname(normalizeHostname(url.hostname))) {
+      return rawBaseUrl;
+    }
+    url.hostname = pageHostname;
+    return url.toString();
+  };
+
+  return {
+    ...target,
+    target: {
+      httpBaseUrl: rewriteIfLoopback(target.target.httpBaseUrl),
+      wsBaseUrl: rewriteIfLoopback(target.target.wsBaseUrl),
+    },
+  };
+}
+
 function resolveWindowOriginPrimaryTarget(): PrimaryEnvironmentTarget {
   const httpBaseUrl = normalizeBaseUrl(window.location.origin);
   const url = new URL(httpBaseUrl);
@@ -150,9 +185,15 @@ export function resolvePrimaryEnvironmentHttpUrl(
 }
 
 export function readPrimaryEnvironmentTarget(): PrimaryEnvironmentTarget | null {
-  return (
-    resolveDesktopPrimaryTarget() ??
-    resolveConfiguredPrimaryTarget() ??
-    resolveWindowOriginPrimaryTarget()
-  );
+  const desktopTarget = resolveDesktopPrimaryTarget();
+  if (desktopTarget) {
+    return desktopTarget;
+  }
+
+  const configuredTarget = resolveConfiguredPrimaryTarget();
+  if (configuredTarget) {
+    return rewriteConfiguredTargetLoopbackHostForPageHostname(configuredTarget);
+  }
+
+  return resolveWindowOriginPrimaryTarget();
 }
