@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "@t3tools/monorepo",
+      "dependencies": {
+        "@t3tools/monorepo": ".",
+      },
       "devDependencies": {
         "@effect/language-service": "catalog:",
         "@oxlint/plugins": "^1.63.0",
@@ -793,6 +796,8 @@
     "@t3tools/desktop": ["@t3tools/desktop@workspace:apps/desktop"],
 
     "@t3tools/marketing": ["@t3tools/marketing@workspace:apps/marketing"],
+
+    "@t3tools/monorepo": ["@t3tools/monorepo@root:", {}],
 
     "@t3tools/oxlint-plugin-t3code": ["@t3tools/oxlint-plugin-t3code@workspace:oxlint-plugin-t3code"],
 
