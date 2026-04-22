@@ -181,12 +181,15 @@ export function createDevRunnerEnv({
 
     if (!isDesktopMode && host !== undefined) {
       output.T3CODE_HOST = host;
+      // Vite reads `HOST` for dev-server bind address (see apps/web/vite.config.ts).
+      output.HOST = host;
     }
 
+    // When `noBrowser` is set (CLI flag or dev-runner config), normalize for children.
+    // When it is unset, keep whatever came from `baseEnv` (e.g. `T3CODE_NO_BROWSER=true bun dev`).
+    // Do not delete here: with `extendEnv: false`, deleting would strip the user's env before turbo/t3.
     if (!isDesktopMode && noBrowser !== undefined) {
       output.T3CODE_NO_BROWSER = noBrowser ? "1" : "0";
-    } else if (!isDesktopMode) {
-      delete output.T3CODE_NO_BROWSER;
     }
 
     if (autoBootstrapProjectFromCwd !== undefined) {
@@ -499,7 +502,9 @@ const devRunnerCli = Command.make("dev-runner", {
     Flag.withFallbackConfig(optionalBooleanConfig("T3CODE_LOG_WS_EVENTS")),
   ),
   host: Flag.string("host").pipe(
-    Flag.withDescription("Server host/interface override (forwards to T3CODE_HOST)."),
+    Flag.withDescription(
+      "Bind host for the API server and Vite (forwards to T3CODE_HOST and HOST). Use 0.0.0.0 to listen on all interfaces (LAN, Tailscale, etc.).",
+    ),
     Flag.withFallbackConfig(optionalStringConfig("T3CODE_HOST")),
   ),
   port: Flag.integer("port").pipe(
