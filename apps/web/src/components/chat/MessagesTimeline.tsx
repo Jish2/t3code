@@ -25,6 +25,7 @@ import {
   CheckIcon,
   CircleAlertIcon,
   EyeIcon,
+  FileTextIcon,
   GlobeIcon,
   HammerIcon,
   type LucideIcon,
@@ -67,6 +68,18 @@ import {
 } from "./userMessageTerminalContexts";
 import { SkillInlineText } from "./SkillInlineText";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
+import {
+  buildFileDiffRenderKey,
+  getRenderablePatch,
+  resolveDiffThemeName,
+  resolveFileDiffPath,
+} from "../../lib/diffRendering";
+import {
+  buildReviewCommentRenderablePatch,
+  parseReviewCommentMessageSegments,
+  type ReviewCommentContext,
+} from "../../reviewCommentContext";
+import { FileDiff } from "@pierre/diffs/react";
 
 // ---------------------------------------------------------------------------
 // Context — shared state consumed by every row component via Context.
@@ -97,6 +110,28 @@ const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
 const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
+const REVIEW_COMMENT_DIFF_UNSAFE_CSS = `
+[data-diffs-header],
+[data-diff],
+[data-file],
+[data-error-wrapper] {
+  --diffs-bg: color-mix(in srgb, var(--background) 94%, var(--card)) !important;
+  --diffs-light-bg: color-mix(in srgb, var(--background) 94%, var(--card)) !important;
+  --diffs-dark-bg: color-mix(in srgb, var(--background) 94%, var(--card)) !important;
+  --diffs-token-light-bg: transparent;
+  --diffs-token-dark-bg: transparent;
+  --diffs-bg-addition-override: color-mix(in srgb, var(--background) 90%, var(--success));
+  --diffs-bg-deletion-override: color-mix(in srgb, var(--background) 90%, var(--destructive));
+  background-color: var(--diffs-bg) !important;
+}
+
+[data-file-info],
+[data-diffs-header] {
+  background-color: color-mix(in srgb, var(--card) 96%, var(--foreground)) !important;
+  border-block-color: var(--border) !important;
+  color: var(--foreground) !important;
+}
+`;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 
 // ---------------------------------------------------------------------------
@@ -327,11 +362,17 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const userImages = row.message.attachments ?? [];
   const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
   const terminalContexts = displayedUserMessage.contexts;
+  const hasReviewCommentContext = displayedUserMessage.visibleText.includes("<review_comment");
   const canRevertAgentWork = typeof row.revertTurnCount === "number";
 
   return (
     <div className="flex justify-end">
-      <div className="group relative max-w-[80%] rounded-2xl rounded-br-sm border border-border bg-secondary px-4 py-3">
+      <div
+        className={cn(
+          "group relative rounded-2xl rounded-br-sm border border-border bg-secondary px-4 py-3",
+          hasReviewCommentContext ? "w-full max-w-[min(56rem,100%)]" : "max-w-[80%]",
+        )}
+      >
         {userImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
             {userImages.map((image: NonNullable<TimelineMessage["attachments"]>[number]) => (
@@ -368,6 +409,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         <CollapsibleUserMessageBody
           text={displayedUserMessage.visibleText}
           terminalContexts={terminalContexts}
+          resolvedTheme={ctx.resolvedTheme}
           skills={ctx.skills}
           footer={
             <>
@@ -769,6 +811,7 @@ function shouldCollapseUserMessage(text: string): boolean {
 const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(props: {
   text: string;
   terminalContexts: ParsedTerminalContextEntry[];
+  resolvedTheme: "light" | "dark";
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   footer?: ReactNode;
 }) {
@@ -798,6 +841,7 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
           <UserMessageBody
             text={props.text}
             terminalContexts={props.terminalContexts}
+            resolvedTheme={props.resolvedTheme}
             skills={props.skills}
           />
         </div>
@@ -835,8 +879,54 @@ const CollapsibleUserMessageBody = memo(function CollapsibleUserMessageBody(prop
 const UserMessageBody = memo(function UserMessageBody(props: {
   text: string;
   terminalContexts: ParsedTerminalContextEntry[];
+  resolvedTheme: "light" | "dark";
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
 }) {
+  const reviewCommentSegments = parseReviewCommentMessageSegments(props.text);
+  const hasReviewCommentSegments = reviewCommentSegments.some(
+    (segment) => segment.kind === "review-comment",
+  );
+  if (hasReviewCommentSegments) {
+    return (
+      <div className="space-y-2">
+        {props.terminalContexts.length > 0 && (
+          <div className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed text-foreground">
+            {props.terminalContexts.map((context) => (
+              <UserMessageTerminalContextInlineLabel
+                key={`user-terminal-context-inline:${context.header}`}
+                context={context}
+              />
+            ))}
+          </div>
+        )}
+        {reviewCommentSegments.map((segment) => {
+          if (segment.kind === "review-comment") {
+            return (
+              <UserReviewCommentCard
+                key={segment.comment.id}
+                comment={segment.comment}
+                resolvedTheme={props.resolvedTheme}
+              />
+            );
+          }
+
+          const text = segment.text.trim();
+          if (text.length === 0) {
+            return null;
+          }
+          return (
+            <div
+              key={segment.id}
+              className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed text-foreground"
+            >
+              {text}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   if (props.terminalContexts.length > 0) {
     const hasEmbeddedInlineLabels = textContainsInlineTerminalContextLabels(
       props.text,
@@ -929,6 +1019,98 @@ const UserMessageBody = memo(function UserMessageBody(props: {
     </div>
   );
 });
+
+const UserReviewCommentCard = memo(function UserReviewCommentCard(props: {
+  comment: ReviewCommentContext;
+  resolvedTheme: "light" | "dark";
+}) {
+  const patch = useMemo(() => buildReviewCommentRenderablePatch(props.comment), [props.comment]);
+  const renderablePatch = useMemo(
+    () => getRenderablePatch(patch, `review-comment:${props.resolvedTheme}:${props.comment.id}`),
+    [patch, props.comment.id, props.resolvedTheme],
+  );
+  const renderableFiles = useMemo(() => {
+    if (!renderablePatch || renderablePatch.kind !== "files") {
+      return [];
+    }
+    return renderablePatch.files.toSorted((left, right) =>
+      resolveFileDiffPath(left).localeCompare(resolveFileDiffPath(right), undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }),
+    );
+  }, [renderablePatch]);
+
+  return (
+    <div className="w-full overflow-hidden rounded-xl border border-border bg-background text-foreground shadow-sm">
+      {renderablePatch ? (
+        renderablePatch.kind === "files" ? (
+          <div className="w-full max-h-[360px] overflow-auto bg-background">
+            {renderableFiles.map((fileDiff) => {
+              const fileKey = `${buildFileDiffRenderKey(fileDiff)}:${props.resolvedTheme}`;
+              return (
+                <div
+                  key={fileKey}
+                  className="diff-render-file review-comment-diff-file w-full border-b border-border/60 last:border-b-0"
+                >
+                  <FileDiff
+                    className="w-full"
+                    fileDiff={fileDiff}
+                    renderCustomHeader={(headerFileDiff) => (
+                      <ReviewCommentDiffHeader filePath={resolveFileDiffPath(headerFileDiff)} />
+                    )}
+                    options={{
+                      diffStyle: "unified",
+                      lineDiffType: "none",
+                      overflow: "wrap",
+                      theme: resolveDiffThemeName(props.resolvedTheme),
+                      themeType: props.resolvedTheme,
+                      unsafeCSS: REVIEW_COMMENT_DIFF_UNSAFE_CSS,
+                    }}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="bg-background">
+            <ReviewCommentDiffHeader filePath={props.comment.filePath} />
+            <pre className="max-h-[320px] overflow-auto border-b border-border/60 bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+              {renderablePatch.text}
+            </pre>
+          </div>
+        )
+      ) : null}
+      {props.comment.text.length > 0 && (
+        <div className="whitespace-pre-wrap wrap-break-word border-t border-border px-3 py-2.5 text-sm leading-relaxed text-foreground">
+          {props.comment.text}
+        </div>
+      )}
+    </div>
+  );
+});
+
+const ReviewCommentDiffHeader = memo(function ReviewCommentDiffHeader(props: { filePath: string }) {
+  return (
+    <div className="flex w-full min-w-0 items-center gap-2 border-b border-border bg-card/70 px-3 py-2">
+      <span className="flex size-6 shrink-0 items-center justify-center rounded-md border border-border/60 bg-muted/70 text-muted-foreground">
+        <FileTextIcon className="size-3.5" />
+      </span>
+      <p
+        className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-foreground"
+        title={props.filePath}
+      >
+        {compactFileName(props.filePath)}
+      </p>
+    </div>
+  );
+});
+
+function compactFileName(filePath: string): string {
+  const normalized = filePath.replaceAll("\\", "/");
+  const lastSlashIndex = normalized.lastIndexOf("/");
+  return lastSlashIndex >= 0 ? normalized.slice(lastSlashIndex + 1) : normalized;
+}
 
 // ---------------------------------------------------------------------------
 // Structural sharing — reuse old row references when data hasn't changed

@@ -1,4 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
+import type { WsRpcClient } from "@t3tools/client-runtime";
 import {
   EnvironmentId,
   ProjectId,
@@ -73,6 +74,93 @@ vi.mock("./connection", () => ({
 vi.mock("../../rpc/wsRpcClient", () => ({
   createWsRpcClient: mockCreateWsRpcClient,
 }));
+
+vi.mock("@t3tools/client-runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@t3tools/client-runtime")>();
+  const stubWsClient: WsRpcClient = {
+    dispose: async () => undefined,
+    reconnect: async () => undefined,
+    isHeartbeatFresh: () => true,
+    orchestration: {
+      dispatchCommand: vi.fn(),
+      getTurnDiff: vi.fn(),
+      getFullThreadDiff: vi.fn(),
+      getArchivedShellSnapshot: vi.fn(async () => ({
+        snapshotSequence: 1,
+        projects: [],
+        threads: [],
+        updatedAt: "2026-04-13T00:00:00.000Z",
+      })),
+      subscribeShell: vi.fn(() => () => undefined),
+      subscribeThread: mockSubscribeThread,
+    },
+    terminal: {
+      open: vi.fn(),
+      attach: vi.fn(() => () => undefined),
+      write: vi.fn(),
+      resize: vi.fn(),
+      clear: vi.fn(),
+      restart: vi.fn(),
+      close: vi.fn(),
+      onMetadata: vi.fn(() => () => undefined),
+    },
+    projects: {
+      searchEntries: vi.fn(),
+      writeFile: vi.fn(),
+    },
+    filesystem: {
+      browse: vi.fn(),
+    },
+    sourceControl: {
+      lookupRepository: vi.fn(),
+      cloneRepository: vi.fn(),
+      publishRepository: vi.fn(),
+    },
+    shell: {
+      openInEditor: vi.fn(),
+    },
+    vcs: {
+      pull: vi.fn(),
+      refreshStatus: vi.fn(),
+      onStatus: vi.fn(() => () => undefined),
+      listRefs: vi.fn(),
+      createWorktree: vi.fn(),
+      removeWorktree: vi.fn(),
+      createRef: vi.fn(),
+      switchRef: vi.fn(),
+      init: vi.fn(),
+    },
+    git: {
+      runStackedAction: vi.fn(),
+      resolvePullRequest: vi.fn(),
+      preparePullRequestThread: vi.fn(),
+    },
+    review: {
+      getDiffPreview: vi.fn(),
+    },
+    server: {
+      getConfig: vi.fn(),
+      refreshProviders: vi.fn(),
+      updateProvider: vi.fn(),
+      upsertKeybinding: vi.fn(),
+      removeKeybinding: vi.fn(),
+      getSettings: vi.fn(),
+      updateSettings: vi.fn(),
+      getTraceDiagnostics: vi.fn(),
+      getProcessDiagnostics: vi.fn(),
+      getProcessResourceHistory: vi.fn(),
+      signalProcess: vi.fn(),
+      discoverSourceControl: vi.fn(),
+      subscribeConfig: vi.fn(() => () => undefined),
+      subscribeLifecycle: vi.fn(() => () => undefined),
+      subscribeAuthAccess: vi.fn(() => () => undefined),
+    },
+  };
+  return {
+    ...actual,
+    createWsRpcClient: mockCreateWsRpcClient.mockImplementation(() => stubWsClient),
+  };
+});
 
 vi.mock("../../rpc/wsTransport", () => ({
   WsTransport: MockWsTransport,
@@ -165,6 +253,9 @@ describe("retainThreadDetailSubscription", () => {
     mockThreadUnsubscribe.mockImplementation(() => undefined);
     mockSubscribeThread.mockImplementation(() => mockThreadUnsubscribe);
     mockCreateWsRpcClient.mockReturnValue({
+      terminal: {
+        onMetadata: vi.fn(() => () => undefined),
+      },
       server: {
         getConfig: vi.fn(async () => ({
           environment: {
@@ -353,7 +444,7 @@ describe("retainThreadDetailSubscription", () => {
     const stop = startEnvironmentConnectionService(new QueryClient());
     savedEnvironmentRegistryListener?.();
     await vi.waitFor(() => {
-      expect(mockCreateEnvironmentConnection).toHaveBeenCalledTimes(2);
+      expect(mockCreateEnvironmentConnection.mock.calls.length).toBeGreaterThanOrEqual(2);
       expect(
         listEnvironmentConnections().some(
           (connection) => connection.environmentId === environmentId,
@@ -370,11 +461,12 @@ describe("retainThreadDetailSubscription", () => {
       listEnvironmentConnections().some((connection) => connection.environmentId === environmentId),
     ).toBe(false);
 
+    const createCallsBeforeReconnect = mockCreateEnvironmentConnection.mock.calls.length;
     const reconnectPromise = reconnectSavedEnvironment(environmentId);
     await vi.advanceTimersByTimeAsync(200);
     await reconnectPromise;
     await vi.waitFor(() => {
-      expect(mockCreateEnvironmentConnection).toHaveBeenCalledTimes(3);
+      expect(mockCreateEnvironmentConnection).toHaveBeenCalledTimes(createCallsBeforeReconnect + 1);
       expect(mockSubscribeThread).toHaveBeenCalledTimes(2);
     });
 

@@ -7,9 +7,14 @@ import {
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamEvent,
   type ServerConfig,
-  type TerminalEvent,
   ThreadId,
 } from "@t3tools/contracts";
+import {
+  createWsRpcClient as createBaseWsRpcClient,
+  type WsProtocolCloseContext,
+  type WsRpcClient,
+} from "@t3tools/client-runtime";
+
 import { type QueryClient } from "@tanstack/react-query";
 import { Throttler } from "@tanstack/react-pacer";
 import {
@@ -26,10 +31,8 @@ import {
   useComposerDraftStore,
 } from "~/composerDraftStore";
 import { ensureLocalApi } from "~/localApi";
-import { collectActiveTerminalThreadIds } from "~/lib/terminalStateCleanup";
+import { collectActiveTerminalUiThreadKeys } from "~/lib/terminalUiStateCleanup";
 import { deriveOrchestrationBatchEffects } from "~/orchestrationEventEffects";
-import { projectQueryKeys } from "~/lib/projectReactQuery";
-import { providerQueryKeys } from "~/lib/providerReactQuery";
 import { getPrimaryKnownEnvironment } from "../primary";
 import {
   bootstrapRemoteBearerSession,
@@ -61,17 +64,17 @@ import {
   selectThreadByRef,
   selectThreadsAcrossEnvironments,
 } from "~/store";
-import { useTerminalStateStore } from "~/terminalStateStore";
+import { useTerminalUiStateStore } from "~/terminalUiStateStore";
 import { useUiStateStore } from "~/uiStateStore";
-import type { WsProtocolCloseContext } from "../../rpc/protocol";
+import { WsTransport } from "~/rpc/wsTransport";
 import { getServerConfig } from "../../rpc/serverState";
-import { WsTransport } from "../../rpc/wsTransport";
-import { createWsRpcClient, type WsRpcClient } from "../../rpc/wsRpcClient";
 import { appendVersionMismatchHint, resolveServerConfigVersionMismatch } from "../../versionSkew";
 import {
   deriveLogicalProjectKeyFromSettings,
   derivePhysicalProjectKey,
 } from "../../logicalProject";
+import { subscribeTerminalMetadata, terminalSessionManager } from "../../terminalSessionState";
+import { resetWsReconnectBackoff } from "~/rpc/wsConnectionState";
 import { getClientSettings } from "~/hooks/useSettings";
 
 type EnvironmentServiceState = {
@@ -115,7 +118,9 @@ const pendingSavedEnvironmentConnections = new Map<
   PendingSavedEnvironmentConnection
 >();
 const environmentConnectionListeners = new Set<() => void>();
+const providerInvalidationListeners = new Set<() => void>();
 const threadDetailSubscriptions = new Map<string, ThreadDetailSubscriptionEntry>();
+const terminalMetadataSubscriptions = new Map<EnvironmentId, () => void>();
 const lastAppliedProjectionVersionByEnvironment = new Map<
   EnvironmentId,
   {
@@ -129,6 +134,13 @@ let needsProviderInvalidation = false;
 let lastBrowserHiddenAt: number | null = null;
 let lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
 
+// TODO(CLIENT-RUNTIME MIGRATION - DO NOT EXPAND THIS WEB-ONLY COPY):
+// This file still owns web's legacy thread-detail subscription cache. Mobile
+// uses createThreadDetailManager from @t3tools/client-runtime for the same
+// retain/reconnect/evict lifecycle. When touching this logic, prefer migrating
+// web to the shared manager or extracting the missing adapter layer instead of
+// adding more behavior here.
+//
 // Thread detail subscription cache policy:
 // - Active consumers keep a subscription retained via refCount.
 // - Released subscriptions stay warm for a longer idle TTL to avoid churn
@@ -592,6 +604,12 @@ function emitEnvironmentConnectionRegistryChange() {
   }
 }
 
+function emitProviderInvalidation() {
+  for (const listener of providerInvalidationListeners) {
+    listener();
+  }
+}
+
 function getRuntimeErrorFields(error: unknown) {
   return {
     lastError: error instanceof Error ? error.message : String(error),
@@ -932,7 +950,7 @@ function reconcileSnapshotDerivedState() {
   syncThreadUiFromStore();
 
   const threads = selectThreadsAcrossEnvironments(useStore.getState());
-  const activeThreadKeys = collectActiveTerminalThreadIds({
+  const activeThreadKeys = collectActiveTerminalUiThreadKeys({
     snapshotThreads: threads.map((thread) => ({
       key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
       deletedAt: null,
@@ -940,18 +958,7 @@ function reconcileSnapshotDerivedState() {
     })),
     draftThreadKeys: useComposerDraftStore.getState().listDraftThreadKeys(),
   });
-  useTerminalStateStore.getState().removeOrphanedTerminalStates(activeThreadKeys);
-}
-
-export function shouldApplyTerminalEvent(input: {
-  serverThreadArchivedAt: string | null | undefined;
-  hasDraftThread: boolean;
-}): boolean {
-  if (input.serverThreadArchivedAt !== undefined) {
-    return input.serverThreadArchivedAt === null;
-  }
-
-  return input.hasDraftThread;
+  useTerminalUiStateStore.getState().removeOrphanedTerminalUiStates(activeThreadKeys);
 }
 
 function applyRecoveredEventBatch(
@@ -1017,8 +1024,10 @@ function applyRecoveredEventBatch(
       draftStore.clearProjectDraftThreadId(scopeProjectRef(environmentId, event.payload.projectId));
     }
   }
-  for (const threadId of batchEffects.removeTerminalStateThreadIds) {
-    useTerminalStateStore.getState().removeTerminalState(scopeThreadRef(environmentId, threadId));
+  for (const threadId of batchEffects.removeTerminalUiStateThreadIds) {
+    useTerminalUiStateStore
+      .getState()
+      .removeTerminalUiState(scopeThreadRef(environmentId, threadId));
   }
 
   reconcileThreadDetailSubscriptionEvictionForEnvironment(environmentId);
@@ -1064,7 +1073,7 @@ function applyShellEvent(event: OrchestrationShellStreamEvent, environmentId: En
         markPromotedDraftThreadByRef(threadRef);
       }
       if (previousThread?.archivedAt === null && event.thread.archivedAt !== null && threadRef) {
-        useTerminalStateStore.getState().removeTerminalState(threadRef);
+        useTerminalUiStateStore.getState().removeTerminalUiState(threadRef);
       }
       reconcileThreadDetailSubscriptionEvictionForThread(environmentId, event.thread.id);
       evictIdleThreadDetailSubscriptionsToCapacity();
@@ -1074,7 +1083,7 @@ function applyShellEvent(event: OrchestrationShellStreamEvent, environmentId: En
         disposeThreadDetailSubscriptionByKey(scopedThreadKey(threadRef));
         useComposerDraftStore.getState().clearDraftThread(threadRef);
         useUiStateStore.getState().clearThreadUi(scopedThreadKey(threadRef));
-        useTerminalStateStore.getState().removeTerminalState(threadRef);
+        useTerminalUiStateStore.getState().removeTerminalUiState(threadRef);
       }
       syncThreadUiFromStore();
       return;
@@ -1085,6 +1094,11 @@ function createEnvironmentConnectionHandlers() {
   return {
     applyShellEvent,
     syncShellSnapshot: (snapshot: OrchestrationShellSnapshot, environmentId: EnvironmentId) => {
+      // TODO(CLIENT-RUNTIME MIGRATION - DO NOT EXPAND THIS WEB-ONLY COPY):
+      // Shell snapshots already have createShellSnapshotManager in
+      // @t3tools/client-runtime. Web currently projects snapshots straight into
+      // its denormalized Zustand store; future shell changes should migrate or
+      // bridge to the shared manager instead of growing this handler.
       if (
         !shouldApplyProjectionSnapshot({
           current: readLastAppliedProjectionVersion(environmentId),
@@ -1103,22 +1117,13 @@ function createEnvironmentConnectionHandlers() {
       reconcileThreadDetailSubscriptionEvictionForEnvironment(environmentId);
       reconcileSnapshotDerivedState();
     },
-    applyTerminalEvent: (event: TerminalEvent, environmentId: EnvironmentId) => {
-      const threadRef = scopeThreadRef(environmentId, ThreadId.make(event.threadId));
-      const serverThread = selectThreadByRef(useStore.getState(), threadRef);
-      const hasDraftThread =
-        useComposerDraftStore.getState().getDraftThreadByRef(threadRef) !== null;
-      if (
-        !shouldApplyTerminalEvent({
-          serverThreadArchivedAt: serverThread?.archivedAt,
-          hasDraftThread,
-        })
-      ) {
-        return;
-      }
-      useTerminalStateStore.getState().applyTerminalEvent(threadRef, event);
-    },
   };
+}
+
+function createWsRpcClient(transport: WsTransport): WsRpcClient {
+  return createBaseWsRpcClient(transport, {
+    beforeReconnect: () => resetWsReconnectBackoff(),
+  });
 }
 
 function createPrimaryEnvironmentClient(
@@ -1249,6 +1254,14 @@ function registerConnection(connection: EnvironmentConnection): EnvironmentConne
     throw new Error(`Environment ${connection.environmentId} already has an active connection.`);
   }
   environmentConnections.set(connection.environmentId, connection);
+  terminalMetadataSubscriptions.get(connection.environmentId)?.();
+  terminalMetadataSubscriptions.set(
+    connection.environmentId,
+    subscribeTerminalMetadata({
+      environmentId: connection.environmentId,
+      client: connection.client,
+    }),
+  );
   attachThreadDetailSubscriptionsForEnvironment(connection.environmentId);
   emitEnvironmentConnectionRegistryChange();
   return connection;
@@ -1262,6 +1275,9 @@ async function removeConnection(environmentId: EnvironmentId): Promise<boolean> 
 
   lastAppliedProjectionVersionByEnvironment.delete(environmentId);
   environmentConnections.delete(environmentId);
+  terminalMetadataSubscriptions.get(environmentId)?.();
+  terminalMetadataSubscriptions.delete(environmentId);
+  terminalSessionManager.invalidateEnvironment(environmentId);
   emitEnvironmentConnectionRegistryChange();
   detachThreadDetailSubscriptionsForEnvironment(environmentId);
   await connection.dispose();
@@ -1459,10 +1475,12 @@ async function syncSavedEnvironmentConnections(
   records: ReadonlyArray<SavedEnvironmentRecord>,
 ): Promise<void> {
   const expectedEnvironmentIds = new Set(records.map((record) => record.environmentId));
-  const staleEnvironmentIds = [...environmentConnections.values()]
-    .filter((connection) => connection.kind === "saved")
-    .map((connection) => connection.environmentId)
-    .filter((environmentId) => !expectedEnvironmentIds.has(environmentId));
+  const staleEnvironmentIds: EnvironmentId[] = [];
+  for (const connection of environmentConnections.values()) {
+    if (connection.kind !== "saved") continue;
+    if (expectedEnvironmentIds.has(connection.environmentId)) continue;
+    staleEnvironmentIds.push(connection.environmentId);
+  }
 
   await Promise.all(
     staleEnvironmentIds.map((environmentId) => disconnectSavedEnvironment(environmentId)),
@@ -1533,6 +1551,13 @@ export function subscribeEnvironmentConnections(listener: () => void): () => voi
   environmentConnectionListeners.add(listener);
   return () => {
     environmentConnectionListeners.delete(listener);
+  };
+}
+
+export function subscribeProviderInvalidations(listener: () => void): () => void {
+  providerInvalidationListeners.add(listener);
+  return () => {
+    providerInvalidationListeners.delete(listener);
   };
 }
 
@@ -1761,8 +1786,7 @@ export function startEnvironmentConnectionService(queryClient: QueryClient): () 
         return;
       }
       needsProviderInvalidation = false;
-      void queryClient.invalidateQueries({ queryKey: providerQueryKeys.all });
-      void queryClient.invalidateQueries({ queryKey: projectQueryKeys.all });
+      emitProviderInvalidation();
     },
     {
       wait: 100,
@@ -1818,6 +1842,11 @@ export async function resetEnvironmentServiceForTests(): Promise<void> {
   for (const key of Array.from(threadDetailSubscriptions.keys())) {
     disposeThreadDetailSubscriptionByKey(key);
   }
+  for (const unsubscribe of terminalMetadataSubscriptions.values()) {
+    unsubscribe();
+  }
+  terminalMetadataSubscriptions.clear();
+  terminalSessionManager.reset();
   await Promise.all(
     [...environmentConnections.keys()].map((environmentId) => removeConnection(environmentId)),
   );

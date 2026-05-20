@@ -239,7 +239,7 @@ describe("remote environment api", () => {
         httpBaseUrl: "https://remote.example.com/",
         bearerToken: "bearer-token",
       }),
-    ).resolves.toBe("wss://remote.example.com/?wsToken=ws-token");
+    ).resolves.toBe("wss://remote.example.com/ws?wsToken=ws-token");
   });
 });
 
