@@ -8,6 +8,7 @@ import {
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
+  ChatImportId,
   CommandId,
   DEFAULT_SERVER_SETTINGS,
   type DpopFailureReason,
@@ -89,6 +90,10 @@ const decodeTransferShellSnapshot = Schema.decodeUnknownEffect(
 );
 
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
+import {
+  ChatImportCatalog,
+  type ChatImportCatalogShape,
+} from "./chatImport/Services/ChatImportCatalog.ts";
 import * as ServerConfig from "./config.ts";
 import { HTTP_ROUTER_CONFIG, makeRoutesLayer } from "./server.ts";
 import {
@@ -433,6 +438,7 @@ const buildAppUnderTest = (options?: {
   config?: Partial<ServerConfig.ServerConfig["Service"]>;
   layers?: {
     keybindings?: Partial<Keybindings.Keybindings["Service"]>;
+    chatImports?: Partial<ChatImportCatalogShape>;
     environmentTheme?: Partial<EnvironmentTheme.EnvironmentThemeService["Service"]>;
     providerRegistry?: Partial<ProviderRegistry.ProviderRegistry["Service"]>;
     providerService?: Partial<ProviderService.ProviderService["Service"]>;
@@ -683,6 +689,26 @@ const buildAppUnderTest = (options?: {
             current: Effect.succeed([]),
             streamChanges: Stream.empty,
             ...options?.layers?.environmentTheme,
+          }),
+          Layer.mock(ChatImportCatalog)({
+            list: () =>
+              Effect.succeed({
+                items: [],
+                nextCursor: null,
+                counts: { inbox: 0, library: 0, archived: 0 },
+              }),
+            get: () => Effect.die("Chat import detail is not stubbed in this test"),
+            setStatus: () => Effect.die("Chat import status is not stubbed in this test"),
+            refresh: Effect.succeed({
+              discovered: 0,
+              updated: 0,
+              unchanged: 0,
+              unavailable: 0,
+              failed: 0,
+            }),
+            start: Effect.void,
+            stream: Stream.empty,
+            ...options?.layers?.chatImports,
           }),
         ),
       ),
@@ -4217,6 +4243,63 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.isUndefined(response.shellRevealInFileManager);
       assert.isUndefined(response.shellRevealInFileManagerKind);
       assert.equal(response.threadResumeCompletionMarker, true);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("routes imported chat queries and lifecycle updates over websocket rpc", () =>
+    Effect.gen(function* () {
+      const importId = ChatImportId.make("cursor:rpc-test");
+      const summary = {
+        id: importId,
+        source: "cursor" as const,
+        externalId: "rpc-test",
+        projectKey: "project",
+        title: "RPC import",
+        status: "inbox" as const,
+        sourceUpdatedAt: "2026-09-01T12:00:00.000Z",
+        firstSeenAt: "2026-09-01T12:00:00.000Z",
+        lastSyncedAt: "2026-09-01T12:00:00.000Z",
+        sourceAvailable: true,
+        syncError: null,
+        entryCount: 1,
+        linkedThreadId: null,
+      };
+      const list = vi.fn((_input: Parameters<ChatImportCatalogShape["list"]>[0]) =>
+        Effect.succeed({
+          items: [summary],
+          nextCursor: null,
+          counts: { inbox: 1, library: 0, archived: 0 },
+        }),
+      );
+      const setStatus = vi.fn(({ status }: Parameters<ChatImportCatalogShape["setStatus"]>[0]) =>
+        Effect.succeed({ ...summary, status }),
+      );
+      yield* buildAppUnderTest({
+        layers: { chatImports: { list, setStatus } },
+      });
+
+      const { cookie } = yield* bootstrapBrowserSession();
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie?.split(";")[0] ?? "",
+      );
+      const listed = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.chatImportsList]({ status: "inbox" })),
+      );
+      const updated = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.chatImportsSetStatus]({
+            id: importId,
+            status: "library",
+          }),
+        ),
+      );
+
+      assert.strictEqual(listed.items[0]?.id, importId);
+      assert.deepStrictEqual(listed.counts, { inbox: 1, library: 0, archived: 0 });
+      assert.strictEqual(updated.status, "library");
+      assert.strictEqual(list.mock.calls[0]?.[0].status, "inbox");
+      assert.strictEqual(setStatus.mock.calls[0]?.[0].status, "library");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

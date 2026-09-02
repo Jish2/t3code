@@ -3,6 +3,17 @@ import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
+import {
+  ChatImportDetail,
+  ChatImportGetInput,
+  ChatImportListInput,
+  ChatImportListResult,
+  ChatImportRefreshResult,
+  ChatImportRpcError,
+  ChatImportSetStatusInput,
+  ChatImportStreamItem,
+  ChatImportSummary,
+} from "./chatImport.ts";
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
   AuthAccessStreamError,
@@ -210,6 +221,13 @@ import {
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
+  // Imported chat catalog methods
+  chatImportsList: "chatImports.list",
+  chatImportsGet: "chatImports.get",
+  chatImportsSetStatus: "chatImports.setStatus",
+  chatImportsRefresh: "chatImports.refresh",
+  subscribeChatImports: "subscribeChatImports",
+
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -337,6 +355,37 @@ export const WS_METHODS = {
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
 } as const;
+
+export const WsChatImportsListRpc = Rpc.make(WS_METHODS.chatImportsList, {
+  payload: ChatImportListInput,
+  success: ChatImportListResult,
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsChatImportsGetRpc = Rpc.make(WS_METHODS.chatImportsGet, {
+  payload: ChatImportGetInput,
+  success: ChatImportDetail,
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsChatImportsSetStatusRpc = Rpc.make(WS_METHODS.chatImportsSetStatus, {
+  payload: ChatImportSetStatusInput,
+  success: ChatImportSummary,
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsChatImportsRefreshRpc = Rpc.make(WS_METHODS.chatImportsRefresh, {
+  payload: Schema.Struct({}),
+  success: ChatImportRefreshResult,
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsSubscribeChatImportsRpc = Rpc.make(WS_METHODS.subscribeChatImports, {
+  payload: Schema.Struct({}),
+  success: ChatImportStreamItem,
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+  stream: true,
+});
 
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
   payload: ServerUpsertKeybindingInput,
@@ -1046,6 +1095,11 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
 
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
+  WsChatImportsListRpc,
+  WsChatImportsGetRpc,
+  WsChatImportsSetStatusRpc,
+  WsChatImportsRefreshRpc,
+  WsSubscribeChatImportsRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,

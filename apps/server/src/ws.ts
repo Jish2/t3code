@@ -136,6 +136,7 @@ import * as SourceControlProviderRegistry from "./sourceControl/SourceControlPro
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
+import { ChatImportCatalog } from "./chatImport/Services/ChatImportCatalog.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
@@ -516,6 +517,7 @@ const makeWsRpcLayer = (
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+      const chatImports = yield* ChatImportCatalog;
       const canReplayPersistedRange = Effect.fnUntraced(function* (
         afterSequence: number,
         headSequence: number,
@@ -1262,6 +1264,16 @@ const makeWsRpcLayer = (
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
       return WsRpcGroup.of({
+        [WS_METHODS.chatImportsList]: (input) =>
+          observeRpcEffect(WS_METHODS.chatImportsList, chatImports.list(input)),
+        [WS_METHODS.chatImportsGet]: (input) =>
+          observeRpcEffect(WS_METHODS.chatImportsGet, chatImports.get(input)),
+        [WS_METHODS.chatImportsSetStatus]: (input) =>
+          observeRpcEffect(WS_METHODS.chatImportsSetStatus, chatImports.setStatus(input)),
+        [WS_METHODS.chatImportsRefresh]: () =>
+          observeRpcEffect(WS_METHODS.chatImportsRefresh, chatImports.refresh),
+        [WS_METHODS.subscribeChatImports]: () =>
+          observeRpcStream(WS_METHODS.subscribeChatImports, chatImports.stream),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,

@@ -1,11 +1,13 @@
 import {
   ArchiveIcon,
   ArrowUpDownIcon,
+  BookOpenIcon,
   ChevronRightIcon,
   CloudIcon,
   ContainerIcon,
   FolderPlusIcon,
   Globe2Icon,
+  InboxIcon,
   LoaderIcon,
   SearchIcon,
   SquarePenIcon,
@@ -63,7 +65,7 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
+import { Link, useLocation, useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import {
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
   MIN_SIDEBAR_THREAD_PREVIEW_COUNT,
@@ -111,6 +113,7 @@ import { ensureLocalApi, readLocalApi } from "../localApi";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
+import { useChatImportCounts } from "../lib/chatImportsState";
 
 import { useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
@@ -2643,6 +2646,74 @@ function LocalSecondaryStatus() {
   );
 }
 
+function LegacyImportedChatsNav() {
+  const { environments } = useEnvironments();
+  const environmentIds = useMemo(
+    () =>
+      environments
+        .filter(
+          (environment) => environment.serverConfig?.environment.capabilities.chatImports === true,
+        )
+        .map((environment) => environment.environmentId),
+    [environments],
+  );
+  const importCounts = useChatImportCounts(environmentIds);
+  const route = useLocation({
+    select: (location) => ({
+      isImports: location.pathname.startsWith("/imports"),
+      status:
+        (location.search as { status?: unknown }).status === "library" ||
+        (location.search as { status?: unknown }).status === "archived"
+          ? (location.search as { status: "library" | "archived" }).status
+          : ("inbox" as const),
+    }),
+  });
+
+  if (environmentIds.length === 0) return null;
+
+  return (
+    <SidebarGroup className="px-2 pt-2 pb-0">
+      <SidebarMenu className="grid grid-cols-3 gap-1">
+        {[
+          { status: "inbox" as const, label: "Inbox", icon: InboxIcon, count: importCounts.inbox },
+          {
+            status: "library" as const,
+            label: "Library",
+            icon: BookOpenIcon,
+            count: importCounts.library,
+          },
+          {
+            status: "archived" as const,
+            label: "Archived",
+            icon: ArchiveIcon,
+            count: importCounts.archived,
+          },
+        ].map((item) => {
+          const Icon = item.icon;
+          const active = route.isImports && route.status === item.status;
+          return (
+            <SidebarMenuItem key={item.status}>
+              <Link
+                to="/imports"
+                search={{ status: item.status }}
+                className={`flex h-8 min-w-0 items-center gap-1.5 rounded-md px-2 text-xs text-sidebar-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground ${
+                  active ? "bg-sidebar-accent text-sidebar-accent-foreground" : ""
+                }`}
+              >
+                <Icon className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                {item.count > 0 ? (
+                  <span className="shrink-0 tabular-nums text-[10px]">{item.count}</span>
+                ) : null}
+              </Link>
+            </SidebarMenuItem>
+          );
+        })}
+      </SidebarMenu>
+    </SidebarGroup>
+  );
+}
+
 type SortableProjectHandleProps = Pick<
   ReturnType<typeof useSortable>,
   "attributes" | "listeners" | "setActivatorNodeRef"
@@ -2959,6 +3030,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
           </Alert>
         </SidebarGroup>
       ) : null}
+      <LegacyImportedChatsNav />
       <LocalSecondaryStatus />
       <SidebarGroup className="px-2 py-2">
         <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">

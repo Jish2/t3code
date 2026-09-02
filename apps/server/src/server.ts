@@ -31,6 +31,7 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
 import * as ProviderSessionRuntime from "./persistence/ProviderSessionRuntime.ts";
+import { ChatImportRepositoryLive } from "./persistence/Layers/ChatImports.ts";
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry.ts";
 import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
@@ -114,6 +115,11 @@ import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinar
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+import {
+  ChatImportCatalogLive,
+  ChatImportRunnerLive,
+} from "./chatImport/Layers/ChatImportCatalog.ts";
+import { CursorTranscriptSourceLive } from "./chatImport/Layers/CursorTranscriptSource.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -400,6 +406,16 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   Layer.provideMerge(OrchestrationLayerLive),
 );
 
+const ChatImportCatalogLayerLive = ChatImportCatalogLive.pipe(
+  Layer.provide(ChatImportRepositoryLive),
+  Layer.provide(CursorTranscriptSourceLive),
+  Layer.provide(ProviderSessionRuntime.layer),
+);
+
+const ChatImportLayerLive = ChatImportRunnerLive.pipe(
+  Layer.provideMerge(ChatImportCatalogLayerLive),
+);
+
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
   Layer.provideMerge(ServerSettingsLayerLive),
@@ -409,7 +425,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   ),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
-  Layer.provideMerge(ProviderRuntimeLayerLive),
+  Layer.provideMerge(Layer.mergeAll(ProviderRuntimeLayerLive, ChatImportLayerLive)),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
   // Both read a user-owned file out of the state directory and stream changes
