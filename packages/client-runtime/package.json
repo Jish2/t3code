@@ -87,6 +87,10 @@
       "types": "./src/state/connections.ts",
       "default": "./src/state/connections.ts"
     },
+    "./state/chat-imports": {
+      "types": "./src/state/chatImports.ts",
+      "default": "./src/state/chatImports.ts"
+    },
     "./state/entities": {
       "types": "./src/state/entities.ts",
       "default": "./src/state/entities.ts"

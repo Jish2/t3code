@@ -31,10 +31,11 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
 import * as ProviderSessionRuntime from "./persistence/ProviderSessionRuntime.ts";
+import { ChatImportRepositoryLive } from "./persistence/Layers/ChatImports.ts";
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry.ts";
 import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
-import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
+import { makeProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
 import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -114,6 +115,12 @@ import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinar
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+import {
+  ChatImportCatalogLive,
+  ChatImportRunnerLive,
+} from "./chatImport/Layers/ChatImportCatalog.ts";
+import { ChatImportCatalog } from "./chatImport/Services/ChatImportCatalog.ts";
+import { CursorTranscriptSourceLive } from "./chatImport/Layers/CursorTranscriptSource.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -280,9 +287,31 @@ const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
 // `create()`; `ProviderEventLoggers.layer` owns the shared native/canonical
 // NDJSON writers and is provided at the outer runtime layer so both
 // `ProviderService` and the per-instance drivers read the same logger pair.
-const ProviderLayerLive = ProviderServiceLive.pipe(
+const ChatImportCatalogLayerLive = ChatImportCatalogLive.pipe(
+  Layer.provide(ChatImportRepositoryLive),
+  Layer.provide(CursorTranscriptSourceLive),
+  Layer.provide(ProviderSessionRuntime.layer),
+  Layer.provide(OrchestrationLayerLive),
+);
+
+const ProviderLayerLive = Layer.unwrap(
+  Effect.map(ChatImportCatalog, (catalog) =>
+    makeProviderServiceLive({
+      reconcileSharedCursorTurn: (threadId) =>
+        catalog.reconcileLinkedTurnCompletion(threadId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("shared Cursor completion reconciliation failed", {
+              threadId,
+              cause,
+            }),
+          ),
+        ),
+    }),
+  ),
+).pipe(
   Layer.provide(ProviderAdapterRegistryLive),
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
+  Layer.provide(ChatImportCatalogLayerLive),
 );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
@@ -400,6 +429,10 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   Layer.provideMerge(OrchestrationLayerLive),
 );
 
+const ChatImportLayerLive = ChatImportRunnerLive.pipe(
+  Layer.provideMerge(ChatImportCatalogLayerLive),
+);
+
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
   Layer.provideMerge(ServerSettingsLayerLive),
@@ -409,7 +442,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   ),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
-  Layer.provideMerge(ProviderRuntimeLayerLive),
+  Layer.provideMerge(Layer.mergeAll(ProviderRuntimeLayerLive, ChatImportLayerLive)),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
   // Both read a user-owned file out of the state directory and stream changes

@@ -2,6 +2,7 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
+  type MessageId,
   type ModelSelection,
   type OrchestrationEvent,
   ProviderDriverKind,
@@ -30,7 +31,7 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import { ProviderAdapterRequestError, ProviderTurnSendError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -50,6 +51,7 @@ import {
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
+const isProviderTurnSendError = Schema.is(ProviderTurnSendError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
 type ProviderIntentEvent = Extract<
@@ -345,6 +347,8 @@ const make = Effect.gen(function* () {
     readonly detail: string;
     readonly turnId: TurnId | null;
     readonly createdAt: string;
+    readonly messageId?: MessageId;
+    readonly reservationOutcome?: "not-admitted" | "unknown" | "admitted";
     readonly requestId?: string;
   }) =>
     Effect.all({
@@ -363,6 +367,8 @@ const make = Effect.gen(function* () {
             summary: input.summary,
             payload: {
               detail: input.detail,
+              ...(input.messageId ? { messageId: input.messageId } : {}),
+              ...(input.reservationOutcome ? { reservationOutcome: input.reservationOutcome } : {}),
               ...(input.requestId ? { requestId: input.requestId } : {}),
             },
             turnId: input.turnId,
@@ -1147,6 +1153,8 @@ const make = Effect.gen(function* () {
         detail: `User message '${event.payload.messageId}' was not found for turn start request.`,
         turnId: null,
         createdAt: event.payload.createdAt,
+        messageId: event.payload.messageId,
+        reservationOutcome: "not-admitted",
       });
       return;
     }
@@ -1184,7 +1192,10 @@ const make = Effect.gen(function* () {
       }
     }
 
-    const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
+    const handleTurnStartFailure = (
+      cause: Cause.Cause<unknown>,
+      reservationOutcome: "not-admitted" | "unknown" | "admitted",
+    ) => {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.void;
       }
@@ -1202,14 +1213,18 @@ const make = Effect.gen(function* () {
             detail,
             turnId: null,
             createdAt: event.payload.createdAt,
+            messageId: event.payload.messageId,
+            reservationOutcome,
           }),
         ),
         Effect.asVoid,
       );
     };
 
-    const recoverTurnStartFailure = (cause: Cause.Cause<unknown>) =>
-      handleTurnStartFailure(cause).pipe(
+    const recoverTurnStartFailure = (cause: Cause.Cause<unknown>) => {
+      const failure = Cause.squash(cause);
+      const reservationOutcome = isProviderTurnSendError(failure) ? failure.phase : "not-admitted";
+      return handleTurnStartFailure(cause, reservationOutcome).pipe(
         Effect.catchCause((recoveryCause) =>
           Effect.logWarning("provider command reactor failed to recover turn start failure", {
             eventType: event.type,
@@ -1219,6 +1234,7 @@ const make = Effect.gen(function* () {
           }),
         ),
       );
+    };
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
@@ -1231,7 +1247,9 @@ const make = Effect.gen(function* () {
       createdAt: event.payload.createdAt,
     }).pipe(
       Effect.map(Option.some),
-      Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
+      Effect.catchCause((cause) =>
+        handleTurnStartFailure(cause, "not-admitted").pipe(Effect.as(Option.none())),
+      ),
     );
 
     if (Option.isNone(sendTurnRequest)) {

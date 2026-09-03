@@ -187,6 +187,23 @@ export class ProviderSessionDirectoryPersistenceError extends Schema.TaggedError
   }
 }
 
+/**
+ * ProviderTurnSendError - Identifies whether a failed send was admitted by
+ * the provider so shared-session reservations can be finalized safely.
+ */
+export class ProviderTurnSendError extends Schema.TaggedErrorClass<ProviderTurnSendError>()(
+  "ProviderTurnSendError",
+  {
+    phase: Schema.Literals(["not-admitted", "unknown", "admitted"]),
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Provider turn send failed (${this.phase}): ${this.detail}`;
+  }
+}
+
 export type ProviderAdapterError =
   | ProviderAdapterValidationError
   | ProviderAdapterSessionNotFoundError
@@ -200,5 +217,6 @@ export type ProviderServiceError =
   | ProviderInstanceNotFoundError
   | ProviderSessionNotFoundError
   | ProviderSessionDirectoryPersistenceError
+  | ProviderTurnSendError
   | ProviderAdapterError
   | CheckpointServiceError;

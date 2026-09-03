@@ -1317,6 +1317,75 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.history.append": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const messageEvents: Array<Omit<OrchestrationEvent, "sequence">> = [];
+      for (const message of command.messages) {
+        messageEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: message.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.threadId,
+            messageId: message.messageId,
+            role: message.role,
+            text: message.text,
+            attachments: [],
+            turnId: command.turnId,
+            streaming: false,
+            createdAt: message.createdAt,
+            updatedAt: message.createdAt,
+          },
+        });
+      }
+      const activityEvents: Array<Omit<OrchestrationEvent, "sequence">> = [];
+      for (const activity of command.activities) {
+        activityEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: activity.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.activity-appended",
+          payload: {
+            threadId: command.threadId,
+            activity,
+          },
+        });
+      }
+      const historyEvents = [...messageEvents, ...activityEvents];
+      if (
+        thread.settledOverride !== null &&
+        command.messages.some((message) => message.role === "user")
+      ) {
+        const unsettledEvent: Omit<OrchestrationEvent, "sequence"> = {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.unsettled",
+          payload: {
+            threadId: command.threadId,
+            reason: "activity",
+            updatedAt: command.createdAt,
+          },
+        };
+        return [unsettledEvent, ...historyEvents];
+      }
+      return historyEvents;
+    }
+
     case "thread.activity.append": {
       const thread = yield* requireThread({
         readModel,

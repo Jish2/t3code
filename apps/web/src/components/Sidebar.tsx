@@ -33,6 +33,8 @@ import type { TimestampFormat } from "@t3tools/contracts/settings";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
+  ArchiveIcon,
+  BookOpenIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
@@ -42,6 +44,7 @@ import {
   FolderIcon,
   FolderPlusIcon,
   GitBranchIcon,
+  InboxIcon,
   MessageSquareIcon,
   PinIcon,
   PlusIcon,
@@ -65,7 +68,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { useParams, useRouter } from "@tanstack/react-router";
+import { Link, useLocation, useParams, useRouter } from "@tanstack/react-router";
 
 import {
   isAtomCommandInterrupted,
@@ -105,6 +108,7 @@ import { useClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
+import { useChatImportCounts } from "../lib/chatImportsState";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useProjects, useThreadShells } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
@@ -1831,6 +1835,26 @@ export default function Sidebar() {
     [],
   );
   const { environments } = useEnvironments();
+  const importEnvironmentIds = useMemo(
+    () =>
+      environments
+        .filter(
+          (environment) => environment.serverConfig?.environment.capabilities.chatImports === true,
+        )
+        .map((environment) => environment.environmentId),
+    [environments],
+  );
+  const importedChatCounts = useChatImportCounts(importEnvironmentIds);
+  const importRouteState = useLocation({
+    select: (location) => ({
+      isImports: location.pathname.startsWith("/imports"),
+      status:
+        (location.search as { status?: unknown }).status === "library" ||
+        (location.search as { status?: unknown }).status === "archived"
+          ? (location.search as { status: "library" | "archived" }).status
+          : ("inbox" as const),
+    }),
+  });
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
@@ -3542,6 +3566,51 @@ export default function Sidebar() {
                 </Tooltip>
               </div>
             </div>
+            {importEnvironmentIds.length > 0 ? (
+              <nav aria-label="Imported chats" className="grid grid-cols-3 gap-1">
+                {[
+                  {
+                    status: "inbox" as const,
+                    label: "Inbox",
+                    icon: InboxIcon,
+                    count: importedChatCounts.inbox,
+                  },
+                  {
+                    status: "library" as const,
+                    label: "Library",
+                    icon: BookOpenIcon,
+                    count: importedChatCounts.library,
+                  },
+                  {
+                    status: "archived" as const,
+                    label: "Archived",
+                    icon: ArchiveIcon,
+                    count: importedChatCounts.archived,
+                  },
+                ].map((item) => {
+                  const Icon = item.icon;
+                  const active =
+                    importRouteState.isImports && importRouteState.status === item.status;
+                  return (
+                    <Link
+                      key={item.status}
+                      to="/imports"
+                      search={{ status: item.status }}
+                      className={cn(
+                        "flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-xs text-sidebar-muted-foreground transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+                        active && "bg-sidebar-row-hover text-sidebar-foreground",
+                      )}
+                    >
+                      <Icon aria-hidden className="size-3.5 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                      {item.count > 0 ? (
+                        <span className="shrink-0 tabular-nums text-[10px]">{item.count}</span>
+                      ) : null}
+                    </Link>
+                  );
+                })}
+              </nav>
+            ) : null}
             {projectGroups.length > 0 ? (
               <div className="flex items-center gap-1">
                 <Combobox
