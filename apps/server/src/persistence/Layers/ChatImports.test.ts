@@ -1,4 +1,4 @@
-import { ChatImportId } from "@t3tools/contracts";
+import { ChatImportId, MessageId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -113,6 +113,105 @@ layer("ChatImportRepository", (it) => {
 
       const listed = yield* repository.list({});
       assert.ok(listed.items.every((item) => item.id !== linkedId));
+    }),
+  );
+
+  it.effect("round-trips continuation state and synchronized turns", () =>
+    Effect.gen(function* () {
+      const repository = yield* ChatImportRepository;
+      const continuationId = ChatImportId.make("cursor:continuation");
+      const threadId = ThreadId.make("thread-continuation");
+      yield* repository.upsertSnapshot({
+        id: continuationId,
+        source: "cursor",
+        sourceKey: "project/continuation/continuation.jsonl",
+        externalId: "continuation",
+        projectKey: "project",
+        sourcePath: "/tmp/continuation.jsonl",
+        title: "Continuation",
+        sourceUpdatedAt: timestamp,
+        firstSeenAt: timestamp,
+        lastSyncedAt: timestamp,
+        sourceMtimeMs: 1,
+        sourceSize: 1,
+        contentDigest: "continuation",
+        linkedThreadId: null,
+        entries: [],
+      });
+      yield* repository.updateContinuation({
+        id: continuationId,
+        linkedThreadId: threadId,
+        syncState: "t3-active",
+        workspaceRoots: ["/tmp/project"],
+        pendingT3UserText: "Continue",
+        pendingT3MessageId: MessageId.make("pending-message"),
+        pendingT3TurnIndex: 2,
+        cursorGenerationId: "cursor-generation",
+      });
+      yield* repository.appendSyncedTurn(continuationId, {
+        turnIndex: 1,
+        turnHash: "hash-1",
+        origin: "cursor",
+      });
+      yield* repository.appendSyncedTurn(continuationId, {
+        turnIndex: 0,
+        turnHash: "hash-0",
+        origin: "t3",
+      });
+
+      const record = Option.getOrThrow(
+        yield* repository.getSourceRecordByPath("/tmp/continuation.jsonl"),
+      );
+      assert.strictEqual(record.linkedThreadId, threadId);
+      assert.strictEqual(record.syncState, "t3-active");
+      assert.deepStrictEqual(record.workspaceRoots, ["/tmp/project"]);
+      assert.strictEqual(record.pendingT3UserText, "Continue");
+      assert.strictEqual(record.pendingT3MessageId, "pending-message");
+      assert.strictEqual(record.pendingT3TurnIndex, 2);
+      assert.strictEqual(record.cursorGenerationId, "cursor-generation");
+      assert.deepStrictEqual(yield* repository.listSyncedTurns(continuationId), [
+        { turnIndex: 0, turnHash: "hash-0", origin: "t3" },
+        { turnIndex: 1, turnHash: "hash-1", origin: "cursor" },
+      ]);
+      yield* repository.clearSyncedTurns(continuationId);
+      assert.deepStrictEqual(yield* repository.listSyncedTurns(continuationId), []);
+      assert.isTrue(
+        Option.isNone(
+          yield* repository.reserveTurn({
+            id: continuationId,
+            pendingT3UserText: "Overtake",
+            pendingT3MessageId: MessageId.make("overtaking-message"),
+            pendingT3TurnIndex: 3,
+          }),
+        ),
+      );
+      yield* repository.updateContinuation({
+        id: continuationId,
+        syncState: "idle",
+        pendingT3UserText: null,
+        pendingT3MessageId: null,
+        pendingT3TurnIndex: null,
+      });
+      assert.isTrue(
+        Option.isSome(
+          yield* repository.reserveTurn({
+            id: continuationId,
+            pendingT3UserText: "Reserved",
+            pendingT3MessageId: MessageId.make("reserved-message"),
+            pendingT3TurnIndex: 3,
+          }),
+        ),
+      );
+      assert.isTrue(
+        Option.isNone(
+          yield* repository.reserveTurn({
+            id: continuationId,
+            pendingT3UserText: "Second",
+            pendingT3MessageId: MessageId.make("second-message"),
+            pendingT3TurnIndex: 3,
+          }),
+        ),
+      );
     }),
   );
 });

@@ -7,6 +7,7 @@ import { ProviderOptionSelections } from "./model.ts";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import {
   ApprovalRequestId,
+  ChatImportId,
   CheckpointRef,
   ClientSurface,
   CommandId,
@@ -695,6 +696,10 @@ export type OrchestrationThreadDetailPage = typeof OrchestrationThreadDetailPage
 export const OrchestrationThreadDetailSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   thread: OrchestrationThread,
+  cursorImportId: Schema.optionalKey(ChatImportId),
+  cursorSyncState: Schema.optionalKey(
+    Schema.Literals(["idle", "cursor-active", "t3-active", "conflict"]),
+  ),
   // Present only on windowed responses. Absent on full snapshots (and from
   // pre-pagination servers), which clients treat as fully loaded.
   page: Schema.optional(OrchestrationThreadDetailPage),
@@ -1099,6 +1104,23 @@ const ThreadActivityAppendCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadHistoryAppendCommand = Schema.Struct({
+  type: Schema.Literal("thread.history.append"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  turnId: TurnId,
+  messages: Schema.Array(
+    Schema.Struct({
+      messageId: MessageId,
+      role: Schema.Literals(["user", "assistant"]),
+      text: Schema.String,
+      createdAt: IsoDateTime,
+    }),
+  ),
+  activities: Schema.Array(OrchestrationThreadActivity),
+  createdAt: IsoDateTime,
+});
+
 const ThreadRevertCompleteCommand = Schema.Struct({
   type: Schema.Literal("thread.revert.complete"),
   commandId: CommandId,
@@ -1123,6 +1145,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadProposedPlanUpsertCommand,
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
+  ThreadHistoryAppendCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
 ]);

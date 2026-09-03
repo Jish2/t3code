@@ -38,10 +38,15 @@ export interface ChatImportSourceShape {
     ReadonlyArray<ChatImportSourceDescriptor>,
     ChatImportSourceError
   >;
+  readonly describePath: (
+    sourcePath: string,
+  ) => Effect.Effect<ChatImportSourceDescriptor | null, ChatImportSourceError>;
   readonly load: (
     descriptor: ChatImportSourceDescriptor,
   ) => Effect.Effect<LoadedChatImportSource, ChatImportSourceError>;
-  readonly watch: (onChange: () => void) => Effect.Effect<void, ChatImportSourceError, Scope.Scope>;
+  readonly watch: (
+    onChange: (sourcePath: string | null) => void,
+  ) => Effect.Effect<void, ChatImportSourceError, Scope.Scope>;
 }
 
 export class ChatImportSource extends Context.Service<ChatImportSource, ChatImportSourceShape>()(

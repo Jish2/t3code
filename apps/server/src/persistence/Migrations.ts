@@ -57,6 +57,8 @@ import Migration0042 from "./Migrations/042_ProjectionThreadLinkedPullRequest.ts
 import Migration0043 from "./Migrations/043_ProjectionThreadsUnsettledAt.ts";
 import Migration0044 from "./Migrations/044_ClearAutomaticProjectModelDefaults.ts";
 import Migration0045 from "./Migrations/045_ChatImports.ts";
+import Migration0046 from "./Migrations/046_ChatImportContinuation.ts";
+import Migration0047 from "./Migrations/047_ChatImportCursorGeneration.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -114,6 +116,8 @@ export const migrationEntries = [
   [43, "ProjectionThreadsUnsettledAt", Migration0043],
   [44, "ClearAutomaticProjectModelDefaults", Migration0044],
   [45, "ChatImports", Migration0045],
+  [46, "ChatImportContinuation", Migration0046],
+  [47, "ChatImportCursorGeneration", Migration0047],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

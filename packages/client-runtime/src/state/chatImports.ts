@@ -62,6 +62,16 @@ export function createChatImportEnvironmentAtoms<R, E>(
       tag: WS_METHODS.chatImportsGet,
       staleTimeMs: 5_000,
     }),
+    linked: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:chat-imports:linked",
+      tag: WS_METHODS.chatImportsGetLinked,
+      staleTimeMs: 5_000,
+    }),
+    liveSyncStatus: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:chat-imports:live-sync-status",
+      tag: WS_METHODS.chatImportsLiveSyncStatus,
+      staleTimeMs: 5_000,
+    }),
     changes: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:chat-imports:changes",
       tag: WS_METHODS.subscribeChatImports,
@@ -82,6 +92,42 @@ export function createChatImportEnvironmentAtoms<R, E>(
       concurrency: {
         mode: "singleFlight",
         key: ({ environmentId }) => environmentId,
+      },
+    }),
+    installLiveSync: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:chat-imports:install-live-sync",
+      tag: WS_METHODS.chatImportsInstallLiveSync,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId }) => environmentId,
+      },
+    }),
+    uninstallLiveSync: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:chat-imports:uninstall-live-sync",
+      tag: WS_METHODS.chatImportsUninstallLiveSync,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId }) => environmentId,
+      },
+    }),
+    adopt: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:chat-imports:adopt",
+      tag: WS_METHODS.chatImportsAdopt,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => `${environmentId}:${input.id}`,
+      },
+    }),
+    resolveConflict: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:chat-imports:resolve-conflict",
+      tag: WS_METHODS.chatImportsResolveConflict,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => `${environmentId}:${input.id}`,
       },
     }),
   };

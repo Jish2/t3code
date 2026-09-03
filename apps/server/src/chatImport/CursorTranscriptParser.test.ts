@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseCursorTranscript } from "./CursorTranscriptParser.ts";
+import { cursorTranscriptTurns, parseCursorTranscript } from "./CursorTranscriptParser.ts";
 
 describe("parseCursorTranscript", () => {
   it("normalizes wrapped user text, tools, and turn endings", () => {
@@ -50,6 +50,17 @@ describe("parseCursorTranscript", () => {
       },
       { kind: "turn-ended", ordinal: 2, status: "success", error: null },
     ]);
+    expect(cursorTranscriptTurns(parsed.entries).completed[0]?.activities).toEqual([
+      {
+        kind: "cursor.imported.tool-call",
+        summary: "Used ReadFile",
+        payload: {
+          role: "assistant",
+          name: "ReadFile",
+          input: { path: "src/import.ts" },
+        },
+      },
+    ]);
   });
 
   it("ignores reminder-only user records and unknown control records", () => {
@@ -74,5 +85,30 @@ describe("parseCursorTranscript", () => {
     expect(() => parseCursorTranscript('{"role":"user"', "fallback")).toThrow(
       "Invalid Cursor transcript JSON on line 1",
     );
+  });
+
+  it("fingerprints only completed turns and reports an incomplete tail", () => {
+    const first = parseCursorTranscript(
+      [
+        JSON.stringify({ role: "user", message: { content: "first" } }),
+        JSON.stringify({ role: "assistant", message: { content: "answer" } }),
+        JSON.stringify({ type: "turn_ended", status: "success" }),
+        JSON.stringify({ role: "user", message: { content: "still running" } }),
+      ].join("\n"),
+      "fallback",
+    );
+    const analyzed = cursorTranscriptTurns(first.entries);
+
+    expect(analyzed.completed).toHaveLength(1);
+    expect(analyzed.completed[0]?.messages).toEqual([
+      { role: "user", text: "first" },
+      { role: "assistant", text: "answer" },
+    ]);
+    expect(analyzed.completed[0]?.activities).toEqual([]);
+    expect(analyzed.completed[0]?.hash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(analyzed.hasIncompleteTail).toBe(true);
+
+    const repeated = cursorTranscriptTurns(first.entries);
+    expect(repeated.completed[0]?.hash).toBe(analyzed.completed[0]?.hash);
   });
 });

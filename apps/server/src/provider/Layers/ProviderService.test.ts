@@ -52,6 +52,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
+  ProviderTurnSendError,
   ProviderUnsupportedError,
   ProviderValidationError,
   type ProviderAdapterError,
@@ -88,6 +89,7 @@ const claudeAgentInstanceId = ProviderInstanceId.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
+const isProviderTurnSendError = Schema.is(ProviderTurnSendError);
 
 const assistantQuoteText = 'Keep the shared parser for "résumé".\nPreserve line breaks.';
 const assistantCitation = {
@@ -316,6 +318,7 @@ const hasMetricSnapshot = (
 function makeProviderServiceLayer(
   input: {
     readonly directory?: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
+    readonly reconcileSharedCursorTurn?: (threadId: ThreadId) => Effect.Effect<void>;
   } = {},
 ) {
   const codex = makeFakeCodexAdapter();
@@ -341,7 +344,11 @@ function makeProviderServiceLayer(
 
   const layer = it.layer(
     Layer.mergeAll(
-      makeProviderServiceLive().pipe(
+      makeProviderServiceLive(
+        input.reconcileSharedCursorTurn === undefined
+          ? undefined
+          : { reconcileSharedCursorTurn: input.reconcileSharedCursorTurn },
+      ).pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(defaultServerSettingsLayer),
@@ -637,7 +644,13 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-const routing = makeProviderServiceLayer();
+const sharedCursorReconciliations: Array<ThreadId> = [];
+const routing = makeProviderServiceLayer({
+  reconcileSharedCursorTurn: (threadId) =>
+    Effect.sync(() => {
+      sharedCursorReconciliations.push(threadId);
+    }),
+});
 
 it.effect(
   "ProviderServiceLive uploads feedback through the adapter that recovered the session",
@@ -961,6 +974,104 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("releases a shared Cursor session only after its turn completes", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      yield* advanceTestClock(10);
+      const threadId = asThreadId("thread-shared-cursor");
+      const cursorInstanceId = ProviderInstanceId.make("cursor");
+      yield* provider.startSession(threadId, {
+        provider: CURSOR_DRIVER,
+        providerInstanceId: cursorInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* directory.upsert({
+        provider: CURSOR_DRIVER,
+        providerInstanceId: cursorInstanceId,
+        threadId,
+        status: "running",
+        runtimePayload: { sharedCursorSession: true },
+      });
+      routing.cursor.stopSession.mockClear();
+      sharedCursorReconciliations.length = 0;
+
+      yield* provider.sendTurn({ threadId, input: "Continue here", attachments: [] });
+      assert.strictEqual(routing.cursor.stopSession.mock.calls.length, 0);
+
+      routing.cursor.emit({
+        eventId: asEventId("evt-shared-cursor-completed"),
+        provider: CURSOR_DRIVER,
+        threadId,
+        turnId: asTurnId(`turn-${threadId}`),
+        createdAt: "2026-09-02T12:00:00.000Z",
+        type: "turn.completed",
+        payload: { state: "completed" },
+      });
+      yield* advanceTestClock(20);
+
+      assert.deepStrictEqual(routing.cursor.stopSession.mock.calls, [[threadId]]);
+      assert.deepStrictEqual(sharedCursorReconciliations, [threadId]);
+      const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      assert.strictEqual(binding?.status, "stopped");
+      assert.strictEqual(
+        typeof binding?.runtimePayload === "object" &&
+          binding.runtimePayload !== null &&
+          "sharedCursorSession" in binding.runtimePayload &&
+          binding.runtimePayload.sharedCursorSession,
+        true,
+      );
+    }),
+  );
+
+  it.effect("preserves a completion that arrives before send bookkeeping finishes", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      yield* advanceTestClock(10);
+      const threadId = asThreadId("thread-shared-cursor-early-completion");
+      const cursorInstanceId = ProviderInstanceId.make("cursor");
+      const turnId = asTurnId(`turn-${threadId}`);
+      yield* provider.startSession(threadId, {
+        provider: CURSOR_DRIVER,
+        providerInstanceId: cursorInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* directory.upsert({
+        provider: CURSOR_DRIVER,
+        providerInstanceId: cursorInstanceId,
+        threadId,
+        status: "running",
+        runtimePayload: { sharedCursorSession: true },
+      });
+      routing.cursor.stopSession.mockClear();
+      routing.cursor.sendTurn.mockImplementationOnce((input) =>
+        Effect.gen(function* () {
+          routing.cursor.emit({
+            eventId: asEventId("evt-shared-cursor-early-completion"),
+            provider: CURSOR_DRIVER,
+            threadId,
+            turnId,
+            createdAt: "2026-09-02T12:00:00.000Z",
+            type: "turn.completed",
+            payload: { state: "completed" },
+          });
+          yield* Effect.yieldNow;
+          return { threadId: input.threadId, turnId };
+        }),
+      );
+
+      yield* provider.sendTurn({ threadId, input: "Fast response", attachments: [] });
+      yield* advanceTestClock(20);
+
+      assert.deepStrictEqual(routing.cursor.stopSession.mock.calls, [[threadId]]);
+      const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      assert.strictEqual(binding?.status, "stopped");
+    }),
+  );
+
   it.effect("allows promptless continuation only for capable providers", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
@@ -988,8 +1099,11 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const failure = yield* Effect.flip(
         provider.sendTurn({ threadId: claudeThreadId, continuation: true }),
       );
-      assert.instanceOf(failure, ProviderValidationError);
-      assert.include(failure.issue, "requires an explicit continuation prompt");
+      assert.isTrue(isProviderTurnSendError(failure));
+      if (isProviderTurnSendError(failure)) {
+        assert.strictEqual(failure.phase, "not-admitted");
+        assert.include(failure.detail, "requires an explicit continuation prompt");
+      }
       assert.equal(routing.claude.sendTurn.mock.calls.length, 0);
 
       yield* provider.stopSession({ threadId: claudeThreadId });
@@ -997,8 +1111,11 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const stoppedFailure = yield* Effect.flip(
         provider.sendTurn({ threadId: claudeThreadId, continuation: true }),
       );
-      assert.instanceOf(stoppedFailure, ProviderValidationError);
-      assert.include(stoppedFailure.issue, "requires an explicit continuation prompt");
+      assert.isTrue(isProviderTurnSendError(stoppedFailure));
+      if (isProviderTurnSendError(stoppedFailure)) {
+        assert.strictEqual(stoppedFailure.phase, "not-admitted");
+        assert.include(stoppedFailure.detail, "requires an explicit continuation prompt");
+      }
       assert.equal(routing.claude.startSession.mock.calls.length, 0);
 
       yield* provider.stopSession({ threadId: codexThreadId });
@@ -1652,7 +1769,11 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
       assert.equal(Exit.isFailure(sendExit), true);
       if (Exit.isFailure(sendExit)) {
-        assert.equal(Cause.hasInterruptsOnly(sendExit.cause), true);
+        const failure = Cause.squash(sendExit.cause);
+        assert.isTrue(isProviderTurnSendError(failure));
+        if (isProviderTurnSendError(failure)) {
+          assert.strictEqual(failure.phase, "unknown");
+        }
       }
       const persisted = yield* runtimeRepository.getByThreadId({
         threadId: session.threadId,
@@ -1668,9 +1789,11 @@ routing.layer("ProviderServiceLive routing", (it) => {
           const runtimePayload = payload as {
             activeTurnId?: string | null;
             lastRuntimeEvent?: string | null;
+            turnAdmissionPhase?: string;
           };
           assert.equal(runtimePayload.activeTurnId ?? null, null);
           assert.notEqual(runtimePayload.lastRuntimeEvent, "provider.sendTurn");
+          assert.strictEqual(runtimePayload.turnAdmissionPhase, "unknown");
         }
       }
     }),

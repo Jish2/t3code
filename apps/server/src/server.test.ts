@@ -698,6 +698,7 @@ const buildAppUnderTest = (options?: {
                 counts: { inbox: 0, library: 0, archived: 0 },
               }),
             get: () => Effect.die("Chat import detail is not stubbed in this test"),
+            getLinked: () => Effect.succeed(null),
             setStatus: () => Effect.die("Chat import status is not stubbed in this test"),
             refresh: Effect.succeed({
               discovered: 0,
@@ -706,6 +707,14 @@ const buildAppUnderTest = (options?: {
               unavailable: 0,
               failed: 0,
             }),
+            liveSyncStatus: Effect.succeed({ state: "not-installed", message: null }),
+            installLiveSync: Effect.succeed({ state: "installed", message: null }),
+            uninstallLiveSync: Effect.succeed({ state: "not-installed", message: null }),
+            adopt: () => Effect.die("Chat import adoption is not stubbed in this test"),
+            resolveConflict: () =>
+              Effect.die("Chat import conflict resolution is not stubbed in this test"),
+            prepareLinkedTurnStart: () => Effect.void,
+            cancelPreparedTurn: () => Effect.void,
             start: Effect.void,
             stream: Stream.empty,
             ...options?.layers?.chatImports,
@@ -4263,6 +4272,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         syncError: null,
         entryCount: 1,
         linkedThreadId: null,
+        syncState: "idle" as const,
+        workspaceRoots: [],
       };
       const list = vi.fn((_input: Parameters<ChatImportCatalogShape["list"]>[0]) =>
         Effect.succeed({
@@ -4274,8 +4285,39 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const setStatus = vi.fn(({ status }: Parameters<ChatImportCatalogShape["setStatus"]>[0]) =>
         Effect.succeed({ ...summary, status }),
       );
+      const linkedThreadId = ThreadId.make("rpc-linked-thread");
+      const adoptedThreadId = ThreadId.make("rpc-adopted-thread");
+      const replacementThreadId = ThreadId.make("rpc-replacement-thread");
+      const getLinked = vi.fn(() =>
+        Effect.succeed({ ...summary, linkedThreadId, syncState: "conflict" as const }),
+      );
+      const liveSyncStatus = Effect.succeed({
+        state: "not-installed" as const,
+        message: null,
+      });
+      const installLiveSync = Effect.succeed({
+        state: "installed" as const,
+        message: null,
+      });
+      const uninstallLiveSync = Effect.succeed({
+        state: "not-installed" as const,
+        message: null,
+      });
+      const adopt = vi.fn(() => Effect.succeed({ threadId: adoptedThreadId }));
+      const resolveConflict = vi.fn(() => Effect.succeed({ threadId: replacementThreadId }));
       yield* buildAppUnderTest({
-        layers: { chatImports: { list, setStatus } },
+        layers: {
+          chatImports: {
+            list,
+            setStatus,
+            getLinked,
+            liveSyncStatus,
+            installLiveSync,
+            uninstallLiveSync,
+            adopt,
+            resolveConflict,
+          },
+        },
       });
 
       const { cookie } = yield* bootstrapBrowserSession();
@@ -4294,10 +4336,51 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
+      const linked = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.chatImportsGetLinked]({ threadId: linkedThreadId }),
+        ),
+      );
+      const liveSync = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.chatImportsLiveSyncStatus]({})),
+      );
+      const installed = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.chatImportsInstallLiveSync]({})),
+      );
+      const uninstalled = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.chatImportsUninstallLiveSync]({})),
+      );
+      const adopted = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.chatImportsAdopt]({
+            id: importId,
+            projectId: ProjectId.make("rpc-project"),
+            threadId: adoptedThreadId,
+            messageId: MessageId.make("rpc-message"),
+            text: "Continue",
+            createdAt: "2026-09-01T12:01:00.000Z",
+          }),
+        ),
+      );
+      const resolved = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.chatImportsResolveConflict]({
+            id: importId,
+            resolution: "accept-cursor-tail",
+            replacementThreadId,
+          }),
+        ),
+      );
 
       assert.strictEqual(listed.items[0]?.id, importId);
       assert.deepStrictEqual(listed.counts, { inbox: 1, library: 0, archived: 0 });
       assert.strictEqual(updated.status, "library");
+      assert.strictEqual(linked?.syncState, "conflict");
+      assert.strictEqual(liveSync.state, "not-installed");
+      assert.strictEqual(installed.state, "installed");
+      assert.strictEqual(uninstalled.state, "not-installed");
+      assert.strictEqual(adopted.threadId, adoptedThreadId);
+      assert.strictEqual(resolved.threadId, replacementThreadId);
       assert.strictEqual(list.mock.calls[0]?.[0].status, "inbox");
       assert.strictEqual(setStatus.mock.calls[0]?.[0].status, "library");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),

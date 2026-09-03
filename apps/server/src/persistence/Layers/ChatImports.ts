@@ -5,10 +5,13 @@ import type {
   ChatImportListResult,
   ChatImportSourceKind,
   ChatImportSummary,
+  MessageId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { toPersistenceSqlError } from "../Errors.ts";
@@ -16,6 +19,7 @@ import {
   ChatImportRepository,
   type ChatImportRepositoryShape,
   type ChatImportSourceRecord,
+  type ChatImportSyncedTurn,
   type UpsertChatImportSnapshot,
 } from "../Services/ChatImports.ts";
 
@@ -33,6 +37,8 @@ interface SummaryRow {
   readonly syncError: string | null;
   readonly entryCount: number;
   readonly linkedThreadId: string | null;
+  readonly syncState: "idle" | "cursor-active" | "t3-active" | "conflict";
+  readonly workspaceRootsJson: string;
 }
 
 interface SourceRow extends SummaryRow {
@@ -41,7 +47,24 @@ interface SourceRow extends SummaryRow {
   readonly sourceMtimeMs: number;
   readonly sourceSize: number;
   readonly contentDigest: string;
+  readonly pendingT3UserText: string | null;
+  readonly pendingT3MessageId: string | null;
+  readonly pendingT3TurnIndex: number | null;
+  readonly cursorGenerationId: string | null;
 }
+
+const WorkspaceRootsJson = Schema.fromJsonString(Schema.Array(Schema.String));
+const decodeWorkspaceRoots = Schema.decodeUnknownSync(WorkspaceRootsJson);
+
+function parseWorkspaceRoots(value: string): ReadonlyArray<string> {
+  try {
+    return decodeWorkspaceRoots(value);
+  } catch {
+    return [];
+  }
+}
+
+const encodeWorkspaceRoots = Schema.encodeSync(WorkspaceRootsJson);
 
 function toSummary(row: SummaryRow): ChatImportSummary {
   return {
@@ -58,6 +81,8 @@ function toSummary(row: SummaryRow): ChatImportSummary {
     syncError: row.syncError,
     entryCount: row.entryCount,
     linkedThreadId: row.linkedThreadId as ChatImportSummary["linkedThreadId"],
+    syncState: row.syncState,
+    workspaceRoots: parseWorkspaceRoots(row.workspaceRootsJson),
   };
 }
 
@@ -69,6 +94,10 @@ function toSourceRecord(row: SourceRow): ChatImportSourceRecord {
     sourceMtimeMs: row.sourceMtimeMs,
     sourceSize: row.sourceSize,
     contentDigest: row.contentDigest,
+    pendingT3UserText: row.pendingT3UserText,
+    pendingT3MessageId: row.pendingT3MessageId as MessageId | null,
+    pendingT3TurnIndex: row.pendingT3TurnIndex,
+    cursorGenerationId: row.cursorGenerationId,
   };
 }
 
@@ -90,7 +119,9 @@ const makeChatImportRepository = Effect.gen(function* () {
         source_available AS sourceAvailable,
         sync_error AS syncError,
         entry_count AS entryCount,
-        linked_thread_id AS linkedThreadId
+        linked_thread_id AS linkedThreadId,
+        sync_state AS syncState,
+        workspace_roots_json AS workspaceRootsJson
       FROM chat_imports
       WHERE import_id = ${id}
       LIMIT 1
@@ -120,13 +151,135 @@ const makeChatImportRepository = Effect.gen(function* () {
         source_mtime_ms AS sourceMtimeMs,
         source_size AS sourceSize,
         content_digest AS contentDigest,
-        linked_thread_id AS linkedThreadId
+        linked_thread_id AS linkedThreadId,
+        sync_state AS syncState,
+        workspace_roots_json AS workspaceRootsJson,
+        pending_t3_user_text AS pendingT3UserText,
+        pending_t3_message_id AS pendingT3MessageId,
+        pending_t3_turn_index AS pendingT3TurnIndex,
+        cursor_generation_id AS cursorGenerationId
       FROM chat_imports
       WHERE source_kind = ${source} AND source_key = ${sourceKey}
       LIMIT 1
     `.pipe(
       Effect.map(
         (rows): Option.Option<SourceRow> => (rows[0] ? Option.some(rows[0]) : Option.none()),
+      ),
+    );
+
+  const getSourceRecordById = (id: ChatImportId) =>
+    sql<SourceRow>`
+      SELECT
+        import_id AS id,
+        source_kind AS source,
+        source_key AS sourceKey,
+        external_id AS externalId,
+        project_key AS projectKey,
+        source_path AS sourcePath,
+        title,
+        status,
+        source_updated_at AS sourceUpdatedAt,
+        first_seen_at AS firstSeenAt,
+        last_synced_at AS lastSyncedAt,
+        source_available AS sourceAvailable,
+        sync_error AS syncError,
+        entry_count AS entryCount,
+        source_mtime_ms AS sourceMtimeMs,
+        source_size AS sourceSize,
+        content_digest AS contentDigest,
+        linked_thread_id AS linkedThreadId,
+        sync_state AS syncState,
+        workspace_roots_json AS workspaceRootsJson,
+        pending_t3_user_text AS pendingT3UserText,
+        pending_t3_message_id AS pendingT3MessageId,
+        pending_t3_turn_index AS pendingT3TurnIndex,
+        cursor_generation_id AS cursorGenerationId
+      FROM chat_imports
+      WHERE import_id = ${id}
+      LIMIT 1
+    `.pipe(
+      Effect.map(
+        (rows): Option.Option<ChatImportSourceRecord> =>
+          rows[0] ? Option.some(toSourceRecord(rows[0])) : Option.none(),
+      ),
+      Effect.mapError(toPersistenceSqlError("ChatImportRepository.getSourceRecordById:query")),
+    );
+
+  const getSourceRecordByPath = (sourcePath: string) =>
+    sql<SourceRow>`
+      SELECT
+        import_id AS id,
+        source_kind AS source,
+        source_key AS sourceKey,
+        external_id AS externalId,
+        project_key AS projectKey,
+        source_path AS sourcePath,
+        title,
+        status,
+        source_updated_at AS sourceUpdatedAt,
+        first_seen_at AS firstSeenAt,
+        last_synced_at AS lastSyncedAt,
+        source_available AS sourceAvailable,
+        sync_error AS syncError,
+        entry_count AS entryCount,
+        source_mtime_ms AS sourceMtimeMs,
+        source_size AS sourceSize,
+        content_digest AS contentDigest,
+        linked_thread_id AS linkedThreadId,
+        sync_state AS syncState,
+        workspace_roots_json AS workspaceRootsJson,
+        pending_t3_user_text AS pendingT3UserText,
+        pending_t3_message_id AS pendingT3MessageId,
+        pending_t3_turn_index AS pendingT3TurnIndex,
+        cursor_generation_id AS cursorGenerationId
+      FROM chat_imports
+      WHERE source_path = ${sourcePath}
+      LIMIT 1
+    `.pipe(
+      Effect.map(
+        (rows): Option.Option<ChatImportSourceRecord> =>
+          rows[0] ? Option.some(toSourceRecord(rows[0])) : Option.none(),
+      ),
+      Effect.mapError(toPersistenceSqlError("ChatImportRepository.getSourceRecordByPath:query")),
+    );
+
+  const getSourceRecordByLinkedThreadId = (threadId: ThreadId) =>
+    sql<SourceRow>`
+      SELECT
+        import_id AS id,
+        source_kind AS source,
+        source_key AS sourceKey,
+        external_id AS externalId,
+        project_key AS projectKey,
+        source_path AS sourcePath,
+        title,
+        status,
+        source_updated_at AS sourceUpdatedAt,
+        first_seen_at AS firstSeenAt,
+        last_synced_at AS lastSyncedAt,
+        source_available AS sourceAvailable,
+        sync_error AS syncError,
+        entry_count AS entryCount,
+        source_mtime_ms AS sourceMtimeMs,
+        source_size AS sourceSize,
+        content_digest AS contentDigest,
+        linked_thread_id AS linkedThreadId,
+        sync_state AS syncState,
+        workspace_roots_json AS workspaceRootsJson,
+        pending_t3_user_text AS pendingT3UserText,
+        pending_t3_message_id AS pendingT3MessageId,
+        pending_t3_turn_index AS pendingT3TurnIndex,
+        cursor_generation_id AS cursorGenerationId
+      FROM chat_imports
+      WHERE linked_thread_id = ${threadId}
+      LIMIT 1
+    `.pipe(
+      Effect.map(
+        (rows): Option.Option<ChatImportSourceRecord> =>
+          rows[0] ? Option.some(toSourceRecord(rows[0])) : Option.none(),
+      ),
+      Effect.mapError(
+        toPersistenceSqlError("ChatImportRepository.getSourceRecordByLinkedThreadId:query"),
       ),
     );
 
@@ -258,7 +411,9 @@ const makeChatImportRepository = Effect.gen(function* () {
           source_available AS sourceAvailable,
           sync_error AS syncError,
           entry_count AS entryCount,
-          linked_thread_id AS linkedThreadId
+          linked_thread_id AS linkedThreadId,
+          sync_state AS syncState,
+          workspace_roots_json AS workspaceRootsJson
         FROM chat_imports
         WHERE linked_thread_id IS NULL
           AND (${status} IS NULL OR status = ${status})
@@ -319,12 +474,128 @@ const makeChatImportRepository = Effect.gen(function* () {
         source_mtime_ms AS sourceMtimeMs,
         source_size AS sourceSize,
         content_digest AS contentDigest,
-        linked_thread_id AS linkedThreadId
+        linked_thread_id AS linkedThreadId,
+        sync_state AS syncState,
+        workspace_roots_json AS workspaceRootsJson,
+        pending_t3_user_text AS pendingT3UserText,
+        pending_t3_message_id AS pendingT3MessageId,
+        pending_t3_turn_index AS pendingT3TurnIndex,
+        cursor_generation_id AS cursorGenerationId
       FROM chat_imports
       WHERE source_kind = ${source}
     `.pipe(
       Effect.map((rows) => rows.map(toSourceRecord)),
       Effect.mapError(toPersistenceSqlError("ChatImportRepository.listSourceRecords:query")),
+    );
+
+  const updateContinuation: ChatImportRepositoryShape["updateContinuation"] = (input) =>
+    Effect.gen(function* () {
+      const existing = Option.getOrUndefined(yield* getSourceRecordById(input.id));
+      if (!existing) {
+        return Option.none<ChatImportSummary>();
+      }
+      yield* sql`
+        UPDATE chat_imports
+        SET
+          linked_thread_id = ${
+            input.linkedThreadId === undefined ? existing.linkedThreadId : input.linkedThreadId
+          },
+          sync_state = ${input.syncState ?? existing.syncState},
+          workspace_roots_json = ${encodeWorkspaceRoots(
+            Array.from(input.workspaceRoots ?? existing.workspaceRoots),
+          )},
+          pending_t3_user_text = ${
+            input.pendingT3UserText === undefined
+              ? existing.pendingT3UserText
+              : input.pendingT3UserText
+          },
+          pending_t3_message_id = ${
+            input.pendingT3MessageId === undefined
+              ? existing.pendingT3MessageId
+              : input.pendingT3MessageId
+          },
+          pending_t3_turn_index = ${
+            input.pendingT3TurnIndex === undefined
+              ? existing.pendingT3TurnIndex
+              : input.pendingT3TurnIndex
+          },
+          cursor_generation_id = ${
+            input.cursorGenerationId === undefined
+              ? existing.cursorGenerationId
+              : input.cursorGenerationId
+          }
+        WHERE import_id = ${input.id}
+      `;
+      return Option.map(yield* getSummary(input.id), toSummary);
+    }).pipe(
+      sql.withTransaction,
+      Effect.mapError(toPersistenceSqlError("ChatImportRepository.updateContinuation:query")),
+    );
+
+  const reserveTurn: ChatImportRepositoryShape["reserveTurn"] = (input) =>
+    Effect.gen(function* () {
+      const updated = yield* sql<{ readonly id: string }>`
+        UPDATE chat_imports
+        SET
+          sync_state = 't3-active',
+          pending_t3_user_text = ${input.pendingT3UserText},
+          pending_t3_message_id = ${input.pendingT3MessageId},
+          pending_t3_turn_index = ${input.pendingT3TurnIndex}
+        WHERE
+          import_id = ${input.id}
+          AND pending_t3_message_id IS NULL
+        RETURNING import_id AS id
+      `;
+      if (updated.length === 0) return Option.none<ChatImportSummary>();
+      return Option.map(yield* getSummary(input.id), toSummary);
+    }).pipe(
+      sql.withTransaction,
+      Effect.mapError(toPersistenceSqlError("ChatImportRepository.reserveTurn:query")),
+    );
+
+  const listSyncedTurns: ChatImportRepositoryShape["listSyncedTurns"] = (id) =>
+    sql<{
+      readonly turnIndex: number;
+      readonly turnHash: string;
+      readonly origin: "cursor" | "t3";
+    }>`
+      SELECT
+        turn_index AS turnIndex,
+        turn_hash AS turnHash,
+        origin
+      FROM chat_import_synced_turns
+      WHERE import_id = ${id}
+      ORDER BY turn_index ASC
+    `.pipe(
+      Effect.map(
+        (rows): ReadonlyArray<ChatImportSyncedTurn> =>
+          rows.map((row) => ({
+            turnIndex: row.turnIndex,
+            turnHash: row.turnHash,
+            origin: row.origin,
+          })),
+      ),
+      Effect.mapError(toPersistenceSqlError("ChatImportRepository.listSyncedTurns:query")),
+    );
+
+  const appendSyncedTurn: ChatImportRepositoryShape["appendSyncedTurn"] = (id, turn) =>
+    sql`
+      INSERT INTO chat_import_synced_turns (import_id, turn_index, turn_hash, origin)
+      VALUES (${id}, ${turn.turnIndex}, ${turn.turnHash}, ${turn.origin})
+      ON CONFLICT (import_id, turn_index)
+      DO UPDATE SET turn_hash = excluded.turn_hash, origin = excluded.origin
+    `.pipe(
+      Effect.asVoid,
+      Effect.mapError(toPersistenceSqlError("ChatImportRepository.appendSyncedTurn:query")),
+    );
+
+  const clearSyncedTurns: ChatImportRepositoryShape["clearSyncedTurns"] = (id) =>
+    sql`
+      DELETE FROM chat_import_synced_turns
+      WHERE import_id = ${id}
+    `.pipe(
+      Effect.asVoid,
+      Effect.mapError(toPersistenceSqlError("ChatImportRepository.clearSyncedTurns:query")),
     );
 
   const setStatus: ChatImportRepositoryShape["setStatus"] = (input) =>
@@ -369,6 +640,14 @@ const makeChatImportRepository = Effect.gen(function* () {
     getById,
     list,
     listSourceRecords,
+    getSourceRecordById,
+    getSourceRecordByPath,
+    getSourceRecordByLinkedThreadId,
+    updateContinuation,
+    reserveTurn,
+    listSyncedTurns,
+    appendSyncedTurn,
+    clearSyncedTurns,
     setStatus,
     markUnavailable,
     markSyncError,

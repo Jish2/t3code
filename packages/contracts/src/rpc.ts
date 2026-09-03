@@ -4,11 +4,17 @@ import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 import {
+  ChatImportAdoptInput,
+  ChatImportAdoptResult,
   ChatImportDetail,
   ChatImportGetInput,
+  ChatImportGetLinkedInput,
+  ChatImportLiveSyncStatus,
   ChatImportListInput,
   ChatImportListResult,
   ChatImportRefreshResult,
+  ChatImportResolveConflictInput,
+  ChatImportResolveConflictResult,
   ChatImportRpcError,
   ChatImportSetStatusInput,
   ChatImportStreamItem,
@@ -224,8 +230,14 @@ export const WS_METHODS = {
   // Imported chat catalog methods
   chatImportsList: "chatImports.list",
   chatImportsGet: "chatImports.get",
+  chatImportsGetLinked: "chatImports.getLinked",
   chatImportsSetStatus: "chatImports.setStatus",
   chatImportsRefresh: "chatImports.refresh",
+  chatImportsLiveSyncStatus: "chatImports.liveSyncStatus",
+  chatImportsInstallLiveSync: "chatImports.installLiveSync",
+  chatImportsUninstallLiveSync: "chatImports.uninstallLiveSync",
+  chatImportsAdopt: "chatImports.adopt",
+  chatImportsResolveConflict: "chatImports.resolveConflict",
   subscribeChatImports: "subscribeChatImports",
 
   // Project registry methods
@@ -368,6 +380,12 @@ export const WsChatImportsGetRpc = Rpc.make(WS_METHODS.chatImportsGet, {
   error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
 });
 
+export const WsChatImportsGetLinkedRpc = Rpc.make(WS_METHODS.chatImportsGetLinked, {
+  payload: ChatImportGetLinkedInput,
+  success: Schema.NullOr(ChatImportSummary),
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+});
+
 export const WsChatImportsSetStatusRpc = Rpc.make(WS_METHODS.chatImportsSetStatus, {
   payload: ChatImportSetStatusInput,
   success: ChatImportSummary,
@@ -377,6 +395,36 @@ export const WsChatImportsSetStatusRpc = Rpc.make(WS_METHODS.chatImportsSetStatu
 export const WsChatImportsRefreshRpc = Rpc.make(WS_METHODS.chatImportsRefresh, {
   payload: Schema.Struct({}),
   success: ChatImportRefreshResult,
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsChatImportsLiveSyncStatusRpc = Rpc.make(WS_METHODS.chatImportsLiveSyncStatus, {
+  payload: Schema.Struct({}),
+  success: ChatImportLiveSyncStatus,
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsChatImportsInstallLiveSyncRpc = Rpc.make(WS_METHODS.chatImportsInstallLiveSync, {
+  payload: Schema.Struct({}),
+  success: ChatImportLiveSyncStatus,
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsChatImportsUninstallLiveSyncRpc = Rpc.make(WS_METHODS.chatImportsUninstallLiveSync, {
+  payload: Schema.Struct({}),
+  success: ChatImportLiveSyncStatus,
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsChatImportsAdoptRpc = Rpc.make(WS_METHODS.chatImportsAdopt, {
+  payload: ChatImportAdoptInput,
+  success: ChatImportAdoptResult,
+  error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
+});
+
+export const WsChatImportsResolveConflictRpc = Rpc.make(WS_METHODS.chatImportsResolveConflict, {
+  payload: ChatImportResolveConflictInput,
+  success: ChatImportResolveConflictResult,
   error: Schema.Union([ChatImportRpcError, EnvironmentAuthorizationError]),
 });
 
@@ -1097,8 +1145,14 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsChatImportsListRpc,
   WsChatImportsGetRpc,
+  WsChatImportsGetLinkedRpc,
   WsChatImportsSetStatusRpc,
   WsChatImportsRefreshRpc,
+  WsChatImportsLiveSyncStatusRpc,
+  WsChatImportsInstallLiveSyncRpc,
+  WsChatImportsUninstallLiveSyncRpc,
+  WsChatImportsAdoptRpc,
+  WsChatImportsResolveConflictRpc,
   WsSubscribeChatImportsRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

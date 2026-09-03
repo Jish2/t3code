@@ -1268,10 +1268,25 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.chatImportsList, chatImports.list(input)),
         [WS_METHODS.chatImportsGet]: (input) =>
           observeRpcEffect(WS_METHODS.chatImportsGet, chatImports.get(input)),
+        [WS_METHODS.chatImportsGetLinked]: (input) =>
+          observeRpcEffect(WS_METHODS.chatImportsGetLinked, chatImports.getLinked(input)),
         [WS_METHODS.chatImportsSetStatus]: (input) =>
           observeRpcEffect(WS_METHODS.chatImportsSetStatus, chatImports.setStatus(input)),
         [WS_METHODS.chatImportsRefresh]: () =>
           observeRpcEffect(WS_METHODS.chatImportsRefresh, chatImports.refresh),
+        [WS_METHODS.chatImportsLiveSyncStatus]: () =>
+          observeRpcEffect(WS_METHODS.chatImportsLiveSyncStatus, chatImports.liveSyncStatus),
+        [WS_METHODS.chatImportsInstallLiveSync]: () =>
+          observeRpcEffect(WS_METHODS.chatImportsInstallLiveSync, chatImports.installLiveSync),
+        [WS_METHODS.chatImportsUninstallLiveSync]: () =>
+          observeRpcEffect(WS_METHODS.chatImportsUninstallLiveSync, chatImports.uninstallLiveSync),
+        [WS_METHODS.chatImportsAdopt]: (input) =>
+          observeRpcEffect(WS_METHODS.chatImportsAdopt, chatImports.adopt(input)),
+        [WS_METHODS.chatImportsResolveConflict]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.chatImportsResolveConflict,
+            chatImports.resolveConflict(input),
+          ),
         [WS_METHODS.subscribeChatImports]: () =>
           observeRpcStream(WS_METHODS.subscribeChatImports, chatImports.stream),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
@@ -1305,8 +1320,29 @@ const makeWsRpcLayer = (
                     ),
                   )
                 : false;
+              const linkedTurnStart =
+                normalizedCommand.type === "thread.turn.start" ? normalizedCommand : null;
+              if (linkedTurnStart !== null) {
+                yield* chatImports.prepareLinkedTurnStart(linkedTurnStart).pipe(
+                  Effect.tapError(() =>
+                    cleanupFailedUploadedAttachments(command, normalizedCommand),
+                  ),
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationDispatchCommandError({
+                        message: cause.message,
+                        cause,
+                      }),
+                  ),
+                );
+              }
               const result = yield* dispatchNormalizedCommand(normalizedCommand).pipe(
                 Effect.tapError(() => cleanupFailedUploadedAttachments(command, normalizedCommand)),
+                Effect.tapError(() =>
+                  linkedTurnStart === null
+                    ? Effect.void
+                    : chatImports.cancelPreparedTurn(linkedTurnStart),
+                ),
               );
               yield* recordClientCommandAnalytics(normalizedCommand);
               if (archiveCommand) {
@@ -1645,6 +1681,14 @@ const makeWsRpcLayer = (
                   cause: input.threadId,
                 });
               }
+              const linkedImport = yield* chatImports
+                .getLinked({ threadId: input.threadId })
+                .pipe(Effect.orElseSucceed(() => null));
+              const projectedSnapshot = {
+                ...projectThreadDetailSnapshot(snapshot.value),
+                cursorSyncState: linkedImport?.syncState ?? "idle",
+                ...(linkedImport === null ? {} : { cursorImportId: linkedImport.id }),
+              } as const;
 
               const afterSnapshot =
                 input.requestCompletionMarker === true
@@ -1660,7 +1704,7 @@ const makeWsRpcLayer = (
               return Stream.concat(
                 Stream.make({
                   kind: "snapshot" as const,
-                  snapshot: projectThreadDetailSnapshot(snapshot.value),
+                  snapshot: projectedSnapshot,
                 }),
                 afterSnapshot,
               );

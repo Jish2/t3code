@@ -63,6 +63,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   pullRequests: Schema.optionalKey(Schema.Boolean),
   /** Server exposes the external chat import catalog and lifecycle APIs. */
   chatImports: Schema.optionalKey(Schema.Boolean),
+  /** Server can adopt imported Cursor chats as native shared-session threads. */
+  chatImportContinuation: Schema.optionalKey(Schema.Boolean),
+  /** Server can install and consume user-level Cursor live-sync hooks. */
+  cursorChatHooks: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.settle / thread.unsettle commands. Absent on
       pre-settlement servers, so clients treat missing as unsupported and
       never send the commands under version skew. */

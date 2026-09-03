@@ -10,13 +10,25 @@ import {
   RefreshCwIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { setChatImportStatus, useChatImportDetail } from "../lib/chatImportsState";
-import { chatImportLifecycleAction } from "../lib/chatImportUi";
-import { cn } from "../lib/utils";
+import {
+  adoptChatImport,
+  resolveChatImportConflict,
+  setChatImportStatus,
+  useChatImportDetail,
+} from "../lib/chatImportsState";
+import {
+  adoptedChatNavigation,
+  chatImportLifecycleAction,
+  suggestedChatImportProjectId,
+} from "../lib/chatImportUi";
+import { newMessageId, newThreadId, cn } from "../lib/utils";
+import { useProjects } from "../state/entities";
+import { useEnvironments } from "../state/environments";
 import ChatMarkdown from "./ChatMarkdown";
 import { Button } from "./ui/button";
+import { Textarea } from "./ui/textarea";
 
 function prettyPayload(value: unknown): string {
   if (typeof value === "string") return value;
@@ -48,8 +60,35 @@ export function ImportedChatDetail({
   const environmentId = EnvironmentId.make(rawEnvironmentId);
   const navigate = useNavigate();
   const imported = useChatImportDetail(environmentId, chatImportId);
+  const projects = useProjects();
+  const { environments } = useEnvironments();
+  const continuationSupported =
+    environments.find((environment) => environment.environmentId === environmentId)?.serverConfig
+      ?.environment.capabilities.chatImportContinuation === true;
+  const environmentProjects = useMemo(
+    () => projects.filter((project) => project.environmentId === environmentId),
+    [environmentId, projects],
+  );
   const [moving, setMoving] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [resolvingConflict, setResolvingConflict] = useState<
+    "keep-t3" | "accept-cursor-tail" | null
+  >(null);
+  const [prompt, setPrompt] = useState("");
+  const [projectId, setProjectId] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
+  const maybeDetail = imported.detail;
+  const suggestedProjectId = useMemo(
+    () =>
+      maybeDetail === null
+        ? null
+        : suggestedChatImportProjectId(maybeDetail.workspaceRoots, environmentProjects),
+    [environmentProjects, maybeDetail],
+  );
+  useEffect(() => {
+    if (!maybeDetail || projectId) return;
+    setProjectId(suggestedProjectId ?? "");
+  }, [maybeDetail, projectId, suggestedProjectId]);
 
   if (imported.isLoading && !imported.detail) {
     return (
@@ -84,6 +123,24 @@ export function ImportedChatDetail({
   const detail = imported.detail;
   const action = chatImportLifecycleAction(detail.status);
   const ActionIcon = iconForStatus(detail.status);
+  const resolveConflict = (resolution: "keep-t3" | "accept-cursor-tail") => {
+    if (detail.linkedThreadId === null || resolvingConflict !== null) return;
+    setResolvingConflict(resolution);
+    setActionError(null);
+    void resolveChatImportConflict({
+      environmentId,
+      id: detail.id,
+      resolution,
+      ...(resolution === "accept-cursor-tail" ? { replacementThreadId: newThreadId() } : {}),
+    })
+      .then((resolvedThreadId) => navigate(adoptedChatNavigation(environmentId, resolvedThreadId)))
+      .catch((cause: unknown) =>
+        setActionError(
+          cause instanceof Error ? cause.message : "Could not resolve the Cursor conflict.",
+        ),
+      )
+      .finally(() => setResolvingConflict(null));
+  };
 
   return (
     <main className="flex min-h-0 flex-1 flex-col bg-background">
@@ -223,6 +280,129 @@ export function ImportedChatDetail({
           ) : null}
         </div>
       </div>
+      {continuationSupported ? (
+        <form
+          className="border-t bg-background px-5 py-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const text = prompt.trim();
+            const project = environmentProjects.find((candidate) => candidate.id === projectId);
+            if (!text || !project || sending) return;
+            const threadId = newThreadId();
+            setSending(true);
+            setActionError(null);
+            void adoptChatImport({
+              environmentId,
+              id: detail.id,
+              projectId: project.id,
+              threadId,
+              messageId: newMessageId(),
+              text,
+              createdAt: new Date().toISOString(),
+            })
+              .then((adoptedThreadId) =>
+                navigate(adoptedChatNavigation(environmentId, adoptedThreadId)),
+              )
+              .catch((error: unknown) =>
+                setActionError(
+                  error instanceof Error ? error.message : "Could not send to this Cursor chat.",
+                ),
+              )
+              .finally(() => setSending(false));
+          }}
+        >
+          <div className="mx-auto max-w-4xl space-y-2">
+            {suggestedProjectId === null &&
+            (environmentProjects.length > 1 || (environmentProjects.length === 1 && !projectId)) ? (
+              <select
+                value={projectId}
+                onChange={(event) => setProjectId(event.target.value)}
+                className="h-8 max-w-full rounded-md border bg-background px-2 text-xs"
+                aria-label="T3 project"
+              >
+                <option value="">Choose a project</option>
+                {environmentProjects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.title} — {project.workspaceRoot}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            {environmentProjects.length === 0 ? (
+              <p className="text-xs text-destructive">
+                Add this Cursor workspace as a T3 project before continuing.
+              </p>
+            ) : null}
+            <div className="flex items-end gap-2">
+              <Textarea
+                value={prompt}
+                onChange={(event) => setPrompt(event.target.value)}
+                placeholder={
+                  detail.syncState === "cursor-active"
+                    ? "Cursor is responding…"
+                    : "Message this Cursor conversation"
+                }
+                disabled={sending || !detail.sourceAvailable || detail.syncState === "conflict"}
+                className="min-h-20 resize-y"
+              />
+              <Button
+                type="submit"
+                disabled={
+                  sending ||
+                  !prompt.trim() ||
+                  !projectId ||
+                  !detail.sourceAvailable ||
+                  detail.syncState === "conflict"
+                }
+              >
+                {sending ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : null}
+                Send
+              </Button>
+            </div>
+            {detail.syncState === "cursor-active" ? (
+              <p className="text-xs text-muted-foreground">
+                Cursor is responding. T3 will wait before sending.
+              </p>
+            ) : detail.syncState === "conflict" ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-destructive">
+                <p>
+                  {detail.linkedThreadId === null
+                    ? "The Cursor source could not be validated. Sync the transcript before retrying."
+                    : "Cursor history changed unexpectedly. Choose which history to continue."}
+                </p>
+                {detail.linkedThreadId !== null ? (
+                  <div className="flex items-center gap-1">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={resolvingConflict !== null}
+                      onClick={() => resolveConflict("keep-t3")}
+                    >
+                      {resolvingConflict === "keep-t3" ? "Keeping..." : "Keep T3"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={resolvingConflict !== null}
+                      onClick={() => resolveConflict("accept-cursor-tail")}
+                    >
+                      {resolvingConflict === "accept-cursor-tail"
+                        ? "Accepting..."
+                        : "Accept Cursor"}
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </form>
+      ) : (
+        <div className="border-t px-5 py-3 text-center text-xs text-muted-foreground">
+          Update this environment to continue imported Cursor chats from T3.
+        </div>
+      )}
     </main>
   );
 }

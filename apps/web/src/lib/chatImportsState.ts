@@ -3,9 +3,13 @@ import {
   ChatImportId,
   type ChatImportCounts,
   type ChatImportDetail,
+  type ChatImportLiveSyncStatus,
   type ChatImportStatus,
   type ChatImportSummary,
   type EnvironmentId,
+  type MessageId,
+  type ProjectId,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import * as Option from "effect/Option";
@@ -121,6 +125,16 @@ const detailAtom = Atom.family((key: string) => {
   const [environmentId, id] = parseDetailKey(key);
   return chatImportEnvironment.detail({ environmentId, input: { id } });
 });
+
+const linkedAtom = Atom.family((key: string) => {
+  const [environmentId, threadId] = JSON.parse(key) as readonly [EnvironmentId, ThreadId];
+  return chatImportEnvironment.linked({ environmentId, input: { threadId } });
+});
+const disabledLinkedAtom = Atom.make(AsyncResult.success<ChatImportSummary | null>(null));
+
+const liveSyncStatusAtom = Atom.family((environmentId: EnvironmentId) =>
+  chatImportEnvironment.liveSyncStatus({ environmentId, input: {} }),
+);
 
 const revisionsAtom = Atom.family((environmentKey: string) => {
   const environmentIds = JSON.parse(environmentKey) as ReadonlyArray<EnvironmentId>;
@@ -245,6 +259,31 @@ export function useChatImportDetail(
   };
 }
 
+export function useLinkedChatImport(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  enabled = true,
+): {
+  readonly linked: ChatImportSummary | null;
+  readonly isLoading: boolean;
+  readonly error: string | null;
+} {
+  const key = JSON.stringify([environmentId, threadId]);
+  const atom = enabled ? linkedAtom(key) : disabledLinkedAtom;
+  const result = useAtomValue(atom);
+  const environmentKey = JSON.stringify([environmentId]);
+  const revision = useAtomValue(revisionsAtom(environmentKey));
+  useEffect(() => {
+    if (!enabled) return;
+    appAtomRegistry.refresh(atom);
+  }, [atom, enabled, revision]);
+  return {
+    linked: Option.getOrNull(AsyncResult.value(result)) ?? null,
+    isLoading: result.waiting,
+    error: result._tag === "Failure" ? formatEnvironmentQueryError(result.cause) : null,
+  };
+}
+
 export async function setChatImportStatus(
   environmentId: EnvironmentId,
   id: ChatImportId,
@@ -279,4 +318,103 @@ export async function refreshChatImportSources(
       refreshChatImportsForEnvironment(environmentId);
     }),
   );
+}
+
+export function useChatImportLiveSyncStatus(environmentId: EnvironmentId): {
+  readonly status: ChatImportLiveSyncStatus | null;
+  readonly isLoading: boolean;
+  readonly error: string | null;
+} {
+  const result = useAtomValue(liveSyncStatusAtom(environmentId));
+  return {
+    status: Option.getOrNull(AsyncResult.value(result)),
+    isLoading: result.waiting,
+    error: result._tag === "Failure" ? formatEnvironmentQueryError(result.cause) : null,
+  };
+}
+
+export async function installChatImportLiveSync(environmentId: EnvironmentId): Promise<void> {
+  const result = await runAtomCommand(
+    appAtomRegistry,
+    chatImportEnvironment.installLiveSync,
+    { environmentId, input: {} },
+    { label: "chat-imports:install-live-sync" },
+  );
+  if (result._tag === "Failure") {
+    throw squashAtomCommandFailure(result);
+  }
+  appAtomRegistry.refresh(liveSyncStatusAtom(environmentId));
+}
+
+export async function uninstallChatImportLiveSync(environmentId: EnvironmentId): Promise<void> {
+  const result = await runAtomCommand(
+    appAtomRegistry,
+    chatImportEnvironment.uninstallLiveSync,
+    { environmentId, input: {} },
+    { label: "chat-imports:uninstall-live-sync" },
+  );
+  if (result._tag === "Failure") {
+    throw squashAtomCommandFailure(result);
+  }
+  appAtomRegistry.refresh(liveSyncStatusAtom(environmentId));
+}
+
+export async function adoptChatImport(input: {
+  readonly environmentId: EnvironmentId;
+  readonly id: ChatImportId;
+  readonly projectId: ProjectId;
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  readonly text: string;
+  readonly createdAt: string;
+}): Promise<ThreadId> {
+  const result = await runAtomCommand(
+    appAtomRegistry,
+    chatImportEnvironment.adopt,
+    {
+      environmentId: input.environmentId,
+      input: {
+        id: input.id,
+        projectId: input.projectId,
+        threadId: input.threadId,
+        messageId: input.messageId,
+        text: input.text,
+        createdAt: input.createdAt,
+      },
+    },
+    { label: "chat-imports:adopt" },
+  );
+  if (result._tag === "Failure") {
+    throw squashAtomCommandFailure(result);
+  }
+  refreshChatImportsForEnvironment(input.environmentId);
+  return result.value.threadId;
+}
+
+export async function resolveChatImportConflict(input: {
+  readonly environmentId: EnvironmentId;
+  readonly id: ChatImportId;
+  readonly resolution: "keep-t3" | "accept-cursor-tail";
+  readonly replacementThreadId?: ThreadId;
+}): Promise<ThreadId> {
+  const result = await runAtomCommand(
+    appAtomRegistry,
+    chatImportEnvironment.resolveConflict,
+    {
+      environmentId: input.environmentId,
+      input: {
+        id: input.id,
+        resolution: input.resolution,
+        ...(input.replacementThreadId === undefined
+          ? {}
+          : { replacementThreadId: input.replacementThreadId }),
+      },
+    },
+    { label: "chat-imports:resolve-conflict" },
+  );
+  if (result._tag === "Failure") {
+    throw squashAtomCommandFailure(result);
+  }
+  refreshChatImportsForEnvironment(input.environmentId);
+  return result.value.threadId;
 }

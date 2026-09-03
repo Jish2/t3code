@@ -86,6 +86,56 @@ async function discoverCursorTranscripts(
   return descriptors.toSorted((left, right) => left.sourceKey.localeCompare(right.sourceKey));
 }
 
+async function describeCursorTranscriptPath(
+  projectsRoot: string,
+  inputPath: string,
+): Promise<ChatImportSourceDescriptor | null> {
+  const sourcePath = NodePath.resolve(inputPath);
+  const relative = NodePath.relative(NodePath.resolve(projectsRoot), sourcePath);
+  if (!relative || relative.startsWith("..") || NodePath.isAbsolute(relative)) {
+    return null;
+  }
+  const parts = relative.split(NodePath.sep);
+  if (parts.length < 3 || parts[1] !== "agent-transcripts" || parts.includes("subagents")) {
+    return null;
+  }
+  const projectKey = parts[0]!;
+  const transcriptParts = parts.slice(2);
+  const filename = transcriptParts.at(-1);
+  if (!filename?.endsWith(".jsonl")) {
+    return null;
+  }
+  const externalId = filename.slice(0, -".jsonl".length);
+  if (
+    transcriptParts.length > 2 ||
+    (transcriptParts.length === 2 && transcriptParts[0] !== externalId)
+  ) {
+    return null;
+  }
+  let stat: NodeFS.Stats;
+  try {
+    stat = await NodeFSP.stat(sourcePath);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile()) {
+    return null;
+  }
+  const transcriptRelativePath = transcriptParts.join("/");
+  const sourceKey = `${projectKey}/${transcriptRelativePath}`;
+  return {
+    id: importId(sourceKey),
+    source: "cursor",
+    sourceKey,
+    externalId,
+    projectKey,
+    sourcePath,
+    sourceUpdatedAt: stat.mtime.toISOString(),
+    sourceMtimeMs: stat.mtimeMs,
+    sourceSize: stat.size,
+  };
+}
+
 export function makeCursorTranscriptSource(
   projectsRoot = NodePath.join(NodeOS.homedir(), ".cursor", "projects"),
 ): ChatImportSourceShape {
@@ -101,6 +151,17 @@ export function makeCursorTranscriptSource(
           cause,
         }),
     }),
+    describePath: (sourcePath) =>
+      Effect.tryPromise({
+        try: () => describeCursorTranscriptPath(projectsRoot, sourcePath),
+        catch: (cause) =>
+          new ChatImportSourceError({
+            operation: "describe",
+            path: sourcePath,
+            detail: `Failed to inspect Cursor transcript at ${sourcePath}`,
+            cause,
+          }),
+      }),
     load: (descriptor) =>
       Effect.tryPromise({
         try: async () => {
@@ -132,7 +193,14 @@ export function makeCursorTranscriptSource(
     watch: (onChange) =>
       Effect.acquireRelease(
         Effect.try({
-          try: () => NodeFS.watch(projectsRoot, { recursive: true }, () => onChange()),
+          try: () =>
+            NodeFS.watch(projectsRoot, { recursive: true }, (_eventType, filename) => {
+              if (filename === null) {
+                onChange(null);
+                return;
+              }
+              onChange(NodePath.resolve(projectsRoot, filename));
+            }),
           catch: (cause) =>
             new ChatImportSourceError({
               operation: "watch",

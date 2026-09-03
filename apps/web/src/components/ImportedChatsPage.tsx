@@ -1,4 +1,4 @@
-import type { ChatImportStatus } from "@t3tools/contracts";
+import type { ChatImportStatus, EnvironmentId } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import {
   ArchiveIcon,
@@ -7,6 +7,7 @@ import {
   CheckIcon,
   InboxIcon,
   LoaderCircleIcon,
+  RadioIcon,
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
@@ -15,15 +16,80 @@ import { useMemo, useState } from "react";
 import { useEnvironments } from "../state/environments";
 import { useDebouncedValue } from "../state/queries";
 import {
+  installChatImportLiveSync,
   refreshChatImportSources,
   setChatImportStatus,
+  uninstallChatImportLiveSync,
+  useChatImportLiveSyncStatus,
   useChatImportList,
   type ScopedChatImportSummary,
 } from "../lib/chatImportsState";
-import { chatImportLifecycleAction } from "../lib/chatImportUi";
+import { chatImportLifecycleAction, chatImportLiveSyncAction } from "../lib/chatImportUi";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+
+function LiveSyncPrompt({
+  environmentId,
+  environmentName,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly environmentName: string;
+}) {
+  const liveSync = useChatImportLiveSyncStatus(environmentId);
+  const [installing, setInstalling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (liveSync.isLoading) {
+    return null;
+  }
+  const action = chatImportLiveSyncAction(liveSync.status?.state ?? null);
+  if (action === null) return null;
+  const installed = action === "disable";
+  return (
+    <div className="flex items-center gap-3 border-b bg-muted/25 px-5 py-3">
+      <RadioIcon className="size-4 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium">
+          {installed ? "Cursor live sync is enabled" : "Enable Cursor live sync"}
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {installed
+            ? `Cursor hooks on ${environmentName} refresh only changed chats.`
+            : `Install a user-level Cursor hook on ${environmentName} so only changed chats are refreshed.`}
+        </p>
+        {(error ?? liveSync.error ?? liveSync.status?.message) ? (
+          <p className="mt-1 text-xs text-destructive">
+            {error ?? liveSync.error ?? liveSync.status?.message}
+          </p>
+        ) : null}
+      </div>
+      <Button
+        size="sm"
+        variant={installed ? "ghost" : "default"}
+        disabled={installing}
+        onClick={() => {
+          setInstalling(true);
+          setError(null);
+          const update = installed
+            ? uninstallChatImportLiveSync(environmentId)
+            : installChatImportLiveSync(environmentId);
+          void update
+            .catch((cause: unknown) =>
+              setError(
+                cause instanceof Error
+                  ? cause.message
+                  : `Could not ${installed ? "disable" : "enable"} live sync.`,
+              ),
+            )
+            .finally(() => setInstalling(false));
+        }}
+      >
+        {installing ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : null}
+        {installed ? "Disable" : "Enable"}
+      </Button>
+    </div>
+  );
+}
 
 const STATUS_TABS: ReadonlyArray<{
   readonly status: ChatImportStatus;
@@ -171,7 +237,7 @@ export function ImportedChatsPage({
           <div>
             <h1 className="text-base font-semibold">Imported chats</h1>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              Read-only Cursor histories synchronized across connected environments
+              Cursor conversations synchronized across connected environments
             </p>
           </div>
           <Button
@@ -223,6 +289,18 @@ export function ImportedChatsPage({
           </div>
         </div>
       </header>
+      {importEnvironments
+        .filter(
+          (environment) =>
+            environment.serverConfig?.environment.capabilities.cursorChatHooks === true,
+        )
+        .map((environment) => (
+          <LiveSyncPrompt
+            key={environment.environmentId}
+            environmentId={environment.environmentId}
+            environmentName={environment.label}
+          />
+        ))}
 
       {(actionError ?? imports.error) ? (
         <div className="border-b border-destructive/25 bg-destructive/10 px-5 py-2 text-xs text-destructive">

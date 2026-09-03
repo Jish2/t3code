@@ -6,7 +6,9 @@ import {
   ChatImportSourceKind,
   ChatImportStatus,
   ChatImportSummary,
+  ChatImportSyncState,
   IsoDateTime,
+  MessageId,
   NonNegativeInt,
   ThreadId,
   type ChatImportEntry,
@@ -25,6 +27,10 @@ export const ChatImportSourceRecord = Schema.Struct({
   sourceMtimeMs: Schema.Number,
   sourceSize: NonNegativeInt,
   contentDigest: Schema.String,
+  pendingT3UserText: Schema.NullOr(Schema.String),
+  pendingT3MessageId: Schema.NullOr(MessageId),
+  pendingT3TurnIndex: Schema.NullOr(NonNegativeInt),
+  cursorGenerationId: Schema.NullOr(Schema.String),
 });
 export type ChatImportSourceRecord = typeof ChatImportSourceRecord.Type;
 
@@ -71,6 +77,30 @@ export const SetChatImportStatusInput = Schema.Struct({
 });
 export type SetChatImportStatusInput = typeof SetChatImportStatusInput.Type;
 
+export interface ChatImportSyncedTurn {
+  readonly turnIndex: number;
+  readonly turnHash: string;
+  readonly origin: "cursor" | "t3";
+}
+
+export interface UpdateChatImportContinuationInput {
+  readonly id: ChatImportId;
+  readonly linkedThreadId?: ThreadId | null;
+  readonly syncState?: ChatImportSyncState;
+  readonly workspaceRoots?: ReadonlyArray<string>;
+  readonly pendingT3UserText?: string | null;
+  readonly pendingT3MessageId?: MessageId | null;
+  readonly pendingT3TurnIndex?: number | null;
+  readonly cursorGenerationId?: string | null;
+}
+
+export interface ReserveChatImportTurnInput {
+  readonly id: ChatImportId;
+  readonly pendingT3UserText: string;
+  readonly pendingT3MessageId: MessageId;
+  readonly pendingT3TurnIndex: number;
+}
+
 export interface ChatImportRepositoryShape {
   readonly upsertSnapshot: (
     input: UpsertChatImportSnapshot,
@@ -84,6 +114,29 @@ export interface ChatImportRepositoryShape {
   readonly listSourceRecords: (
     source: ChatImportSourceKind,
   ) => Effect.Effect<ReadonlyArray<ChatImportSourceRecord>, ProjectionRepositoryError>;
+  readonly getSourceRecordById: (
+    id: ChatImportId,
+  ) => Effect.Effect<Option.Option<ChatImportSourceRecord>, ProjectionRepositoryError>;
+  readonly getSourceRecordByPath: (
+    sourcePath: string,
+  ) => Effect.Effect<Option.Option<ChatImportSourceRecord>, ProjectionRepositoryError>;
+  readonly getSourceRecordByLinkedThreadId: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<ChatImportSourceRecord>, ProjectionRepositoryError>;
+  readonly updateContinuation: (
+    input: UpdateChatImportContinuationInput,
+  ) => Effect.Effect<Option.Option<ChatImportSummary>, ProjectionRepositoryError>;
+  readonly reserveTurn: (
+    input: ReserveChatImportTurnInput,
+  ) => Effect.Effect<Option.Option<ChatImportSummary>, ProjectionRepositoryError>;
+  readonly listSyncedTurns: (
+    id: ChatImportId,
+  ) => Effect.Effect<ReadonlyArray<ChatImportSyncedTurn>, ProjectionRepositoryError>;
+  readonly appendSyncedTurn: (
+    id: ChatImportId,
+    turn: ChatImportSyncedTurn,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+  readonly clearSyncedTurns: (id: ChatImportId) => Effect.Effect<void, ProjectionRepositoryError>;
   readonly setStatus: (
     input: SetChatImportStatusInput,
   ) => Effect.Effect<Option.Option<ChatImportSummary>, ProjectionRepositoryError>;

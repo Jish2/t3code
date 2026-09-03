@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { projectThreadDetailSnapshot } from "./ActivityPayloadProjection.ts";
+import { ChatImportCatalog } from "../chatImport/Services/ChatImportCatalog.ts";
 import { cleanupFailedUploadedAttachments, normalizeDispatchCommand } from "./Normalizer.ts";
 import {
   annotateEnvironmentRequest,
@@ -25,6 +26,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const orchestrationEngine = yield* OrchestrationEngineService;
+    const chatImports = yield* ChatImportCatalog;
 
     return handlers
       .handle(
@@ -85,7 +87,15 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           if (Option.isNone(snapshot)) {
             return yield* failEnvironmentNotFound("thread_not_found");
           }
-          return projectThreadDetailSnapshot(snapshot.value);
+          const projected = projectThreadDetailSnapshot(snapshot.value);
+          const linked = yield* chatImports
+            .getLinked({ threadId: args.params.threadId })
+            .pipe(Effect.orElseSucceed(() => null));
+          return {
+            ...projected,
+            cursorSyncState: linked?.syncState ?? "idle",
+            ...(linked === null ? {} : { cursorImportId: linked.id }),
+          };
         }),
       )
       .handle(
@@ -96,9 +106,26 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           const normalizedCommand = yield* normalizeDispatchCommand(args.payload).pipe(
             Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
           );
+          const linkedTurnStart =
+            normalizedCommand.type === "thread.turn.start" ? normalizedCommand : null;
+          if (linkedTurnStart !== null) {
+            yield* chatImports.prepareLinkedTurnStart(linkedTurnStart).pipe(
+              Effect.tapError(() =>
+                cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
+              ),
+              Effect.catch((cause) =>
+                failEnvironmentInternal("orchestration_dispatch_failed", cause),
+              ),
+            );
+          }
           return yield* orchestrationEngine.dispatch(normalizedCommand).pipe(
             Effect.tapError(() =>
               cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
+            ),
+            Effect.tapError(() =>
+              linkedTurnStart === null
+                ? Effect.void
+                : chatImports.cancelPreparedTurn(linkedTurnStart),
             ),
             Effect.catch((cause) =>
               failEnvironmentInternal("orchestration_dispatch_failed", cause),

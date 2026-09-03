@@ -159,6 +159,8 @@ import {
   useThreadPreviewState,
 } from "../previewStateStore";
 import { previewRuntimeTabId } from "../browser/previewRuntimeTabId";
+import { resolveChatImportConflict, useLinkedChatImport } from "../lib/chatImportsState";
+import { chatImportSyncNotice } from "../lib/chatImportUi";
 import { addBrowserSurface } from "./preview/addBrowserSurface";
 import { closePreviewSession } from "./preview/closePreviewSession";
 import { ThreadPreviewMiniPlayer } from "./preview/ThreadPreviewMiniPlayer";
@@ -1363,6 +1365,17 @@ function ChatViewContent(props: ChatViewProps) {
     () => new Map(environments.map((environment) => [environment.environmentId, environment])),
     [environments],
   );
+  const linkedChatImport = useLinkedChatImport(
+    environmentId,
+    threadId,
+    routeKind === "server" &&
+      environmentById.get(environmentId)?.serverConfig?.environment.capabilities
+        .chatImportContinuation === true,
+  );
+  const [resolvingCursorConflict, setResolvingCursorConflict] = useState<
+    "keep-t3" | "accept-cursor-tail" | null
+  >(null);
+  const [cursorConflictError, setCursorConflictError] = useState<string | null>(null);
   const composerDraftTarget: ScopedThreadRef | DraftId =
     routeKind === "server" ? routeThreadRef : props.draftId;
   const draftThread = useComposerDraftStore((store) =>
@@ -1412,6 +1425,36 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const timestampFormat = settings.timestampFormat;
   const navigate = useNavigate();
+  const handleResolveCursorConflict = useCallback(
+    (resolution: "keep-t3" | "accept-cursor-tail") => {
+      const linked = linkedChatImport.linked;
+      if (linked === null || resolvingCursorConflict !== null) return;
+      setResolvingCursorConflict(resolution);
+      setCursorConflictError(null);
+      const replacementThreadId = resolution === "accept-cursor-tail" ? newThreadId() : undefined;
+      void resolveChatImportConflict({
+        environmentId,
+        id: linked.id,
+        resolution,
+        ...(replacementThreadId === undefined ? {} : { replacementThreadId }),
+      })
+        .then((resolvedThreadId) => {
+          if (resolution === "accept-cursor-tail") {
+            return navigate({
+              to: "/$environmentId/$threadId",
+              params: { environmentId, threadId: resolvedThreadId },
+            });
+          }
+        })
+        .catch((cause: unknown) => {
+          setCursorConflictError(
+            cause instanceof Error ? cause.message : "Could not resolve the Cursor conflict.",
+          );
+        })
+        .finally(() => setResolvingCursorConflict(null));
+    },
+    [environmentId, linkedChatImport.linked, navigate, resolvingCursorConflict],
+  );
   const citationLocation = useLocation({
     select: (location) => ({
       href: location.href,
@@ -5157,6 +5200,66 @@ function ChatViewContent(props: ChatViewProps) {
     }
     void handleSwitchCheckoutToThread();
   }, [gitStatusQuery.data?.hasWorkingTreeChanges, handleSwitchCheckoutToThread]);
+  const cursorSyncBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    const linked = linkedChatImport.linked;
+    const notice = linked === null ? null : chatImportSyncNotice(linked.syncState);
+    if (linked === null || notice === null) return null;
+    if (linked.syncState === "cursor-active") {
+      return {
+        id: `cursor-sync:${linked.id}:cursor-active`,
+        variant: "info",
+        priority: "activity",
+        icon: <AlarmClockIcon />,
+        title: notice.title,
+        description: "Your message will wait for the Cursor turn to finish.",
+      };
+    }
+    if (linked.syncState === "t3-active") {
+      return {
+        id: `cursor-sync:${linked.id}:t3-active`,
+        variant: "info",
+        priority: "activity",
+        icon: <CheckCircle2Icon />,
+        title: notice.title,
+        description: "T3 is reconciling this shared Cursor session.",
+      };
+    }
+    return {
+      id: `cursor-sync:${linked.id}:conflict`,
+      variant: "error",
+      priority: "urgent",
+      icon: <WifiOffIcon />,
+      title: notice.title,
+      description:
+        cursorConflictError ??
+        "Choose which history to continue. T3 will not write to the shared session until resolved.",
+      actions: (
+        <div className="flex items-center gap-1">
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={resolvingCursorConflict !== null}
+            onClick={() => handleResolveCursorConflict("keep-t3")}
+          >
+            {resolvingCursorConflict === "keep-t3" ? "Keeping..." : "Keep T3"}
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={resolvingCursorConflict !== null}
+            onClick={() => handleResolveCursorConflict("accept-cursor-tail")}
+          >
+            {resolvingCursorConflict === "accept-cursor-tail" ? "Accepting..." : "Accept Cursor"}
+          </Button>
+        </div>
+      ),
+    };
+  }, [
+    cursorConflictError,
+    handleResolveCursorConflict,
+    linkedChatImport.linked,
+    resolvingCursorConflict,
+  ]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
@@ -5164,9 +5267,11 @@ function ChatViewContent(props: ChatViewProps) {
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
+    const cursorSyncItems = cursorSyncBannerItem === null ? [] : [cursorSyncBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...systemComposerBannerItems,
+        ...cursorSyncItems,
         ...backgroundLivenessItems,
         ...resumeCompactionItems,
         ...wokeThreadItems,
@@ -5175,6 +5280,7 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return [
       ...systemComposerBannerItems,
+      ...cursorSyncItems,
       ...backgroundLivenessItems,
       ...resumeCompactionItems,
       ...wokeThreadItems,
@@ -5221,6 +5327,7 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
+    cursorSyncBannerItem,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,
@@ -7413,9 +7520,11 @@ function ChatViewContent(props: ChatViewProps) {
                             sendDisabledReason={
                               feedbackUploading
                                 ? "Sending feedback"
-                                : threadDetailLoading
-                                  ? "Messages loading"
-                                  : null
+                                : linkedChatImport.linked?.syncState === "conflict"
+                                  ? "Resolve the Cursor history conflict"
+                                  : threadDetailLoading
+                                    ? "Messages loading"
+                                    : null
                             }
                             isPreparingWorktree={isPreparingWorktree}
                             bannerItems={composerBannerItems}

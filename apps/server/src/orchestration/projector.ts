@@ -804,11 +804,44 @@ export function projectEvent(
           ]
             .toSorted(compareThreadActivities)
             .slice(-500);
+          const importedTurnCompleted =
+            payload.activity.kind === "cursor.external-turn.completed" &&
+            payload.activity.turnId !== null;
+          const importedStatus =
+            importedTurnCompleted &&
+            typeof payload.activity.payload === "object" &&
+            payload.activity.payload !== null &&
+            "status" in payload.activity.payload
+              ? payload.activity.payload.status
+              : null;
+          const turnMessages = importedTurnCompleted
+            ? thread.messages.filter((message) => message.turnId === payload.activity.turnId)
+            : [];
+          const requestedAt = turnMessages[0]?.createdAt ?? payload.activity.createdAt;
+          const assistantMessageId =
+            turnMessages.findLast((message) => message.role === "assistant")?.id ?? null;
 
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
               activities,
+              ...(importedTurnCompleted
+                ? {
+                    latestTurn: {
+                      turnId: payload.activity.turnId!,
+                      state:
+                        importedStatus === "error"
+                          ? ("error" as const)
+                          : importedStatus === "aborted"
+                            ? ("interrupted" as const)
+                            : ("completed" as const),
+                      requestedAt,
+                      startedAt: requestedAt,
+                      completedAt: payload.activity.createdAt,
+                      assistantMessageId,
+                    },
+                  }
+                : {}),
               updatedAt: event.occurredAt,
             }),
           };

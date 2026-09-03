@@ -27,6 +27,7 @@ import {
 } from "@t3tools/contracts";
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -49,7 +50,11 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
-import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
+import {
+  type ProviderAdapterError,
+  ProviderTurnSendError,
+  ProviderValidationError,
+} from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
@@ -69,6 +74,7 @@ const isModelSelection = Schema.is(ModelSelection);
  */
 export interface ProviderServiceLiveOptions {
   readonly canonicalEventLogger?: EventNdjsonLogger;
+  readonly reconcileSharedCursorTurn?: (threadId: ThreadId) => Effect.Effect<void>;
   /**
    * Overrides MCP credential issuance. The real issuer reads a module-global
    * registry that only a running MCP server installs, which makes the
@@ -176,6 +182,18 @@ function readPersistedCwd(
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function isSharedCursorSession(
+  runtimePayload: ProviderSessionDirectory.ProviderRuntimeBinding["runtimePayload"],
+): boolean {
+  return (
+    runtimePayload !== null &&
+    typeof runtimePayload === "object" &&
+    !Array.isArray(runtimePayload) &&
+    "sharedCursorSession" in runtimePayload &&
+    runtimePayload.sharedCursorSession === true
+  );
+}
+
 const dieOnMissingBindingInstanceId = (
   operation: string,
   payload: {
@@ -234,6 +252,59 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     options?.revokeMcpCredential ?? McpSessionRegistry.revokeActiveMcpThread;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+  const completedSharedCursorTurns = yield* Ref.make<ReadonlySet<string>>(new Set());
+  const sharedCursorTurnKey = (threadId: ThreadId, turnId: string) => `${threadId}\0${turnId}`;
+  const rememberEarlySharedCursorCompletion = (threadId: ThreadId, turnId: string) =>
+    Ref.update(completedSharedCursorTurns, (current) => {
+      const next = new Set(current);
+      next.add(sharedCursorTurnKey(threadId, turnId));
+      return next;
+    });
+  const consumeEarlySharedCursorCompletion = (threadId: ThreadId, turnId: string) =>
+    Ref.modify(completedSharedCursorTurns, (current) => {
+      const key = sharedCursorTurnKey(threadId, turnId);
+      if (!current.has(key)) return [false, current] as const;
+      const next = new Set(current);
+      next.delete(key);
+      return [true, next] as const;
+    });
+  const releaseSharedCursorSession = (input: {
+    readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+    readonly instanceId: ProviderInstanceId;
+    readonly provider: ProviderDriverKind;
+    readonly threadId: ThreadId;
+  }) =>
+    Effect.gen(function* () {
+      if (options?.reconcileSharedCursorTurn !== undefined) {
+        yield* options.reconcileSharedCursorTurn(input.threadId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider shared Cursor transcript reconciliation failed", {
+              threadId: input.threadId,
+              cause,
+            }),
+          ),
+        );
+      }
+      yield* input.adapter.stopSession(input.threadId);
+      yield* directory.upsert({
+        threadId: input.threadId,
+        provider: input.provider,
+        providerInstanceId: input.instanceId,
+        status: "stopped",
+        runtimePayload: {
+          activeTurnId: null,
+          lastRuntimeEvent: "provider.sharedCursorSession.released",
+          lastRuntimeEventAt: yield* nowIso,
+        },
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider shared Cursor session release failed", {
+          threadId: input.threadId,
+          cause,
+        }),
+      ),
+    );
   /**
    * Attach the `t3-code` MCP server to the session that is about to start.
    *
@@ -342,17 +413,58 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     source: {
       readonly instanceId: ProviderInstanceId;
       readonly provider: ProviderDriverKind;
+      readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
     },
     event: ProviderRuntimeEvent,
   ): Effect.Effect<void> =>
-    Effect.sync(() => correlateRuntimeEventWithInstance(source, event)).pipe(
-      Effect.flatMap((canonicalEvent) =>
-        increment(providerRuntimeEventsTotal, {
-          provider: canonicalEvent.provider,
-          eventType: canonicalEvent.type,
-        }).pipe(Effect.andThen(publishRuntimeEvent(canonicalEvent))),
-      ),
-    );
+    Effect.gen(function* () {
+      const canonicalEvent = yield* Effect.sync(() =>
+        correlateRuntimeEventWithInstance(source, event),
+      );
+      yield* increment(providerRuntimeEventsTotal, {
+        provider: canonicalEvent.provider,
+        eventType: canonicalEvent.type,
+      }).pipe(Effect.andThen(publishRuntimeEvent(canonicalEvent)));
+
+      if (
+        source.provider !== "cursor" ||
+        (canonicalEvent.type !== "turn.completed" && canonicalEvent.type !== "turn.aborted")
+      ) {
+        return;
+      }
+      const binding = Option.getOrUndefined(
+        yield* directory.getBinding(canonicalEvent.threadId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider shared Cursor session binding lookup failed", {
+              threadId: canonicalEvent.threadId,
+              cause,
+            }).pipe(Effect.as(Option.none())),
+          ),
+        ),
+      );
+      if (!isSharedCursorSession(binding?.runtimePayload ?? null)) return;
+      const runtimePayload = binding?.runtimePayload;
+      const activeTurnId =
+        runtimePayload !== null &&
+        runtimePayload !== undefined &&
+        typeof runtimePayload === "object" &&
+        !Array.isArray(runtimePayload) &&
+        "activeTurnId" in runtimePayload
+          ? runtimePayload.activeTurnId
+          : undefined;
+      if (typeof canonicalEvent.turnId !== "string") return;
+      if (typeof activeTurnId !== "string") {
+        yield* rememberEarlySharedCursorCompletion(canonicalEvent.threadId, canonicalEvent.turnId);
+        return;
+      }
+      if (activeTurnId !== canonicalEvent.turnId) return;
+      yield* releaseSharedCursorSession({
+        adapter: source.adapter,
+        instanceId: source.instanceId,
+        provider: source.provider,
+        threadId: canonicalEvent.threadId,
+      });
+    });
 
   // `subscribedAdapters` is our source-of-truth for "which instance adapters
   // are currently wired into the runtime event bus". It both tracks the set
@@ -393,6 +505,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             {
               instanceId: id,
               provider: adapter.provider,
+              adapter,
             },
             event,
           ),
@@ -514,6 +627,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     if (hasRequestedSession) {
       return {
         adapter,
+        binding,
         instanceId,
         threadId: input.threadId,
         runtimeMode: binding.runtimeMode,
@@ -524,6 +638,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     if (!input.allowRecovery) {
       return {
         adapter,
+        binding,
         instanceId,
         threadId: input.threadId,
         runtimeMode: binding.runtimeMode,
@@ -537,6 +652,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
     return {
       adapter: recovered.adapter,
+      binding,
       instanceId,
       threadId: input.threadId,
       runtimeMode: recovered.session.runtimeMode,
@@ -776,6 +892,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
     let metricProvider = "unknown";
     let metricModel = input.modelSelection?.model;
+    let sendPhase: "not-admitted" | "unknown" | "admitted" = "not-admitted";
     return yield* Effect.gen(function* () {
       let routed = yield* resolveRoutableSession({
         threadId: input.threadId,
@@ -812,33 +929,98 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       // rather than issuing a new one: sessions that go a long time between
       // browser tool calls used to lose the toolkit outright.
       yield* McpSessionRegistry.touchActiveMcpThread(input.threadId);
-      const turn = yield* routed.adapter.sendTurn(input);
+      const sharedCursorSession =
+        routed.adapter.provider === "cursor" &&
+        isSharedCursorSession(routed.binding.runtimePayload ?? null);
       yield* directory.upsert({
         threadId: input.threadId,
         provider: routed.adapter.provider,
         providerInstanceId: routed.instanceId,
-        status: "running",
-        ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+        status: routed.binding.status ?? "stopped",
         runtimePayload: {
-          ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-          activeTurnId: turn.turnId,
-          lastRuntimeEvent: "provider.sendTurn",
+          turnAdmissionPhase: "unknown",
+          lastRuntimeEvent: "provider.sendTurn.admitting",
           lastRuntimeEventAt: yield* nowIso,
         },
       });
-      yield* analytics.record("provider.turn.sent", {
-        provider: routed.adapter.provider,
-        model: input.modelSelection?.model,
-        interactionMode: input.interactionMode,
-        // Session-start events alone skew runtime mode toward users who toggle
-        // often, since every toggle restarts the session. Recording it per turn
-        // gives a usage-weighted view and lets it cross with interactionMode.
-        runtimeMode: routed.runtimeMode,
-        attachmentCount: attachments.length,
-        hasInput: typeof input.input === "string" && input.input.trim().length > 0,
-      });
+      sendPhase = "unknown";
+      const turn = yield* routed.adapter.sendTurn(input);
+      sendPhase = "admitted";
+      yield* directory
+        .upsert({
+          threadId: input.threadId,
+          provider: routed.adapter.provider,
+          providerInstanceId: routed.instanceId,
+          status: "running",
+          ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
+          runtimePayload: {
+            ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+            activeTurnId: turn.turnId,
+            turnAdmissionPhase: "admitted",
+            lastRuntimeEvent: "provider.sendTurn",
+            lastRuntimeEventAt: yield* nowIso,
+          },
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            sharedCursorSession
+              ? consumeEarlySharedCursorCompletion(input.threadId, turn.turnId).pipe(
+                  Effect.andThen(
+                    releaseSharedCursorSession({
+                      adapter: routed.adapter,
+                      instanceId: routed.instanceId,
+                      provider: routed.adapter.provider,
+                      threadId: input.threadId,
+                    }),
+                  ),
+                  Effect.andThen(Effect.failCause(cause)),
+                )
+              : Effect.failCause(cause),
+          ),
+        );
+      if (
+        sharedCursorSession &&
+        (yield* consumeEarlySharedCursorCompletion(input.threadId, turn.turnId))
+      ) {
+        yield* releaseSharedCursorSession({
+          adapter: routed.adapter,
+          instanceId: routed.instanceId,
+          provider: routed.adapter.provider,
+          threadId: input.threadId,
+        });
+      }
+      yield* analytics
+        .record("provider.turn.sent", {
+          provider: routed.adapter.provider,
+          model: input.modelSelection?.model,
+          interactionMode: input.interactionMode,
+          // Session-start events alone skew runtime mode toward users who toggle
+          // often, since every toggle restarts the session. Recording it per turn
+          // gives a usage-weighted view and lets it cross with interactionMode.
+          runtimeMode: routed.runtimeMode,
+          attachmentCount: attachments.length,
+          hasInput: typeof input.input === "string" && input.input.trim().length > 0,
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider turn analytics failed", {
+              threadId: input.threadId,
+              cause,
+            }),
+          ),
+        );
       return turn;
     }).pipe(
+      Effect.catchCause((cause) => {
+        const squashed = Cause.squash(cause);
+        return Effect.fail(
+          new ProviderTurnSendError({
+            phase: sendPhase,
+            detail: squashed instanceof Error ? squashed.message : String(squashed),
+            cause: squashed,
+          }),
+        );
+      }),
       withMetrics({
         counter: providerTurnsTotal,
         timer: providerTurnDuration,

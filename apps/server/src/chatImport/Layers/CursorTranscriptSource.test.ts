@@ -28,6 +28,7 @@ describe("CursorTranscriptSource", () => {
       yield* Effect.promise(() =>
         NodeFSP.writeFile(
           NodePath.join(transcriptDir, "parent-id.jsonl"),
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
           `${JSON.stringify({
             role: "user",
             message: {
@@ -39,6 +40,7 @@ describe("CursorTranscriptSource", () => {
       yield* Effect.promise(() =>
         NodeFSP.writeFile(
           NodePath.join(transcriptDir, "subagents", "child-id.jsonl"),
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
           `${JSON.stringify({
             role: "user",
             message: {
@@ -56,6 +58,15 @@ describe("CursorTranscriptSource", () => {
         projectKey: "project-key",
         sourceKey: "project-key/parent-id/parent-id.jsonl",
       });
+      expect(
+        yield* source.describePath(NodePath.join(transcriptDir, "parent-id.jsonl")),
+      ).toMatchObject({
+        externalId: "parent-id",
+        sourceKey: "project-key/parent-id/parent-id.jsonl",
+      });
+      expect(
+        yield* source.describePath(NodePath.join(transcriptDir, "subagents", "child-id.jsonl")),
+      ).toBeNull();
 
       const loaded = yield* source.load(descriptors[0]!);
       expect(loaded.title).toBe("Parent chat");

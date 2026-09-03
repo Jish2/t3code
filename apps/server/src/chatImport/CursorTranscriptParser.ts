@@ -1,8 +1,30 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
 import type { ChatImportContentBlock, ChatImportEntry } from "@t3tools/contracts";
 
 export interface ParsedCursorTranscript {
   readonly title: string;
   readonly entries: ReadonlyArray<ChatImportEntry>;
+}
+
+export interface CursorCompletedTurn {
+  readonly index: number;
+  readonly hash: string;
+  readonly status: Extract<ChatImportEntry, { kind: "turn-ended" }>["status"];
+  readonly messages: ReadonlyArray<{
+    readonly role: "user" | "assistant";
+    readonly text: string;
+  }>;
+  readonly activities: ReadonlyArray<{
+    readonly kind: string;
+    readonly summary: string;
+    readonly payload: unknown;
+  }>;
+}
+
+export interface CursorTranscriptTurns {
+  readonly completed: ReadonlyArray<CursorCompletedTurn>;
+  readonly hasIncompleteTail: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -130,5 +152,88 @@ export function parseCursorTranscript(raw: string, fallbackTitle: string): Parse
   return {
     title: normalizeTitle(titleText, fallbackTitle),
     entries,
+  };
+}
+
+function messageText(entry: Extract<ChatImportEntry, { kind: "message" }>): string {
+  return entry.blocks
+    .filter(
+      (block): block is Extract<ChatImportContentBlock, { type: "text" }> => block.type === "text",
+    )
+    .map((block) => block.text.trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function messageActivities(
+  entry: Extract<ChatImportEntry, { kind: "message" }>,
+): CursorCompletedTurn["activities"] {
+  const activities: Array<CursorCompletedTurn["activities"][number]> = [];
+  for (const block of entry.blocks) {
+    switch (block.type) {
+      case "text":
+        break;
+      case "tool-call":
+        activities.push({
+          kind: "cursor.imported.tool-call",
+          summary: `Used ${block.name}`,
+          payload: { role: entry.role, name: block.name, input: block.input },
+        });
+        break;
+      case "tool-result":
+        activities.push({
+          kind: "cursor.imported.tool-result",
+          summary: "Cursor tool result",
+          payload: { role: entry.role, content: block.content },
+        });
+        break;
+      case "unknown":
+        activities.push({
+          kind: "cursor.imported.unknown",
+          summary: "Imported Cursor activity",
+          payload: { role: entry.role, content: block.payload },
+        });
+        break;
+    }
+  }
+  return activities;
+}
+
+export function cursorTranscriptTurns(
+  entries: ReadonlyArray<ChatImportEntry>,
+): CursorTranscriptTurns {
+  const completed: CursorCompletedTurn[] = [];
+  let pending: ChatImportEntry[] = [];
+
+  for (const entry of entries) {
+    pending.push(entry);
+    if (entry.kind !== "turn-ended") {
+      continue;
+    }
+    const messages = pending.flatMap((candidate) => {
+      if (candidate.kind !== "message" || candidate.role === "unknown") {
+        return [];
+      }
+      const text = messageText(candidate);
+      return text ? [{ role: candidate.role, text }] : [];
+    });
+    const activities = pending.flatMap((candidate) =>
+      candidate.kind === "message" ? messageActivities(candidate) : [],
+    );
+    if (messages.length > 0 || activities.length > 0) {
+      completed.push({
+        index: completed.length,
+        hash: NodeCrypto.createHash("sha256").update(JSON.stringify(pending)).digest("hex"),
+        status: entry.status,
+        messages,
+        activities,
+      });
+    }
+    pending = [];
+  }
+
+  return {
+    completed,
+    hasIncompleteTail: pending.some((entry) => entry.kind === "message"),
   };
 }

@@ -1,10 +1,13 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
   ChatImportId,
   IsoDateTime,
+  MessageId,
   NonNegativeInt,
   PositiveInt,
+  ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
@@ -14,6 +17,28 @@ export type ChatImportSourceKind = typeof ChatImportSourceKind.Type;
 
 export const ChatImportStatus = Schema.Literals(["inbox", "library", "archived"]);
 export type ChatImportStatus = typeof ChatImportStatus.Type;
+
+export const ChatImportSyncState = Schema.Literals([
+  "idle",
+  "cursor-active",
+  "t3-active",
+  "conflict",
+]);
+export type ChatImportSyncState = typeof ChatImportSyncState.Type;
+
+export const ChatImportLiveSyncState = Schema.Literals([
+  "not-installed",
+  "installed",
+  "unavailable",
+  "error",
+]);
+export type ChatImportLiveSyncState = typeof ChatImportLiveSyncState.Type;
+
+export const ChatImportLiveSyncStatus = Schema.Struct({
+  state: ChatImportLiveSyncState,
+  message: Schema.NullOr(Schema.String),
+});
+export type ChatImportLiveSyncStatus = typeof ChatImportLiveSyncStatus.Type;
 
 export const ChatImportCounts = Schema.Struct({
   inbox: NonNegativeInt,
@@ -73,6 +98,8 @@ export const ChatImportSummary = Schema.Struct({
   syncError: Schema.NullOr(Schema.String),
   entryCount: NonNegativeInt,
   linkedThreadId: Schema.NullOr(ThreadId),
+  syncState: ChatImportSyncState.pipe(Schema.withDecodingDefault(Effect.succeed("idle"))),
+  workspaceRoots: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
 export type ChatImportSummary = typeof ChatImportSummary.Type;
 
@@ -102,11 +129,46 @@ export const ChatImportGetInput = Schema.Struct({
 });
 export type ChatImportGetInput = typeof ChatImportGetInput.Type;
 
+export const ChatImportGetLinkedInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type ChatImportGetLinkedInput = typeof ChatImportGetLinkedInput.Type;
+
 export const ChatImportSetStatusInput = Schema.Struct({
   id: ChatImportId,
   status: ChatImportStatus,
 });
 export type ChatImportSetStatusInput = typeof ChatImportSetStatusInput.Type;
+
+export const ChatImportAdoptInput = Schema.Struct({
+  id: ChatImportId,
+  projectId: ProjectId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  text: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+export type ChatImportAdoptInput = typeof ChatImportAdoptInput.Type;
+
+export const ChatImportAdoptResult = Schema.Struct({
+  threadId: ThreadId,
+});
+export type ChatImportAdoptResult = typeof ChatImportAdoptResult.Type;
+
+export const ChatImportConflictResolution = Schema.Literals(["keep-t3", "accept-cursor-tail"]);
+export type ChatImportConflictResolution = typeof ChatImportConflictResolution.Type;
+
+export const ChatImportResolveConflictInput = Schema.Struct({
+  id: ChatImportId,
+  resolution: ChatImportConflictResolution,
+  replacementThreadId: Schema.optional(ThreadId),
+});
+export type ChatImportResolveConflictInput = typeof ChatImportResolveConflictInput.Type;
+
+export const ChatImportResolveConflictResult = Schema.Struct({
+  threadId: ThreadId,
+});
+export type ChatImportResolveConflictResult = typeof ChatImportResolveConflictResult.Type;
 
 export const ChatImportRefreshResult = Schema.Struct({
   discovered: NonNegativeInt,
@@ -158,9 +220,27 @@ export class ChatImportOperationError extends Schema.TaggedErrorClass<ChatImport
   },
 ) {}
 
+export class ChatImportSourceBusyError extends Schema.TaggedErrorClass<ChatImportSourceBusyError>()(
+  "ChatImportSourceBusyError",
+  {
+    id: ChatImportId,
+    message: Schema.String,
+  },
+) {}
+
+export class ChatImportConflictError extends Schema.TaggedErrorClass<ChatImportConflictError>()(
+  "ChatImportConflictError",
+  {
+    id: ChatImportId,
+    message: Schema.String,
+  },
+) {}
+
 export const ChatImportRpcError = Schema.Union([
   ChatImportNotFoundError,
   ChatImportInvalidStatusTransitionError,
   ChatImportOperationError,
+  ChatImportSourceBusyError,
+  ChatImportConflictError,
 ]);
 export type ChatImportRpcError = typeof ChatImportRpcError.Type;
